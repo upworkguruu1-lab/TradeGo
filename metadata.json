@@ -1,0 +1,6 @@
+{
+  "name": "ScalpMaster Pro — Скальпинг и Копи-Трейдинг",
+  "description": "Профессиональный торговый терминал онлайн-скальпинга с сигналами для повторения (Copy Trading), расчетом комиссий, риск-менеджментом и живым графиком.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
