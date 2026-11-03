@@ -22,6 +22,7 @@ import {
   checkVwap,
   checkBreak,
   checkPullback,
+  calculateStructuralSlTp,
 } from './utils/indicators';
 import {
   playChime,
@@ -47,8 +48,11 @@ const DEFAULT_SETTINGS: TerminalSettings = {
   riskPct: 1.0,
   leverage: 1, // 1x for spot (own funds)
   feeRatePct: 0.05,
-  slAtr: 0.6,
-  tpAtr: 1.8,
+  slAtr: 1.4,
+  tpAtr: 2.4,
+  useDynamicSlTp: true,
+  trailingStopEnabled: true,
+  timeframeOptimized: '5m',
   useSound: true,
   useVoice: true,
   usePushNotifications: false,
@@ -425,17 +429,41 @@ export default function App() {
       // Smart Break-Even Move: if price moved 50% toward TP, move SL to entry + slight buffer
       const targetDelta = Math.abs(pos.tp - pos.entry);
       const curMove = Math.abs(currentPrice - pos.entry);
-      if (!pos.layer2Done && curMove >= targetDelta * 0.55 && pnlGrossPct > 0.4) {
-        const breakEvenPrice = pos.dir === 'LONG' ? pos.entry * 1.0005 : pos.entry * 0.9995;
+      if (!pos.layer2Done && curMove >= targetDelta * 0.5 && pnlGrossPct > 0.3) {
+        const breakEvenPrice = pos.dir === 'LONG' ? pos.entry * 1.0008 : pos.entry * 0.9992;
         setPositions((prev) =>
           prev.map((p) =>
             p.id === pos.id ? { ...p, sl: breakEvenPrice, layer2Done: true } : p
           )
         );
-        addLog(`🛡️ Защита прибыли: Stop-Loss по ${pos.symbol} переведен в безубыток!`, 'info');
+        addLog(`🛡️ Безубыток (5M PRO): Стоп по ${pos.symbol} переведен в +0.08%! Риск сделки = 0%`, 'info');
+      }
+
+      // Dynamic Trailing Stop: if enabled and price has progressed > 70% towards TP, trail SL closely
+      if (settings.trailingStopEnabled && curMove >= targetDelta * 0.70) {
+        const trailBuffer = targetDelta * 0.25;
+        if (pos.dir === 'LONG') {
+          const newTrailingSl = currentPrice - trailBuffer;
+          if (newTrailingSl > pos.sl) {
+            setPositions((prev) =>
+              prev.map((p) =>
+                p.id === pos.id ? { ...p, sl: newTrailingSl, trailingActivated: true } : p
+              )
+            );
+          }
+        } else {
+          const newTrailingSl = currentPrice + trailBuffer;
+          if (newTrailingSl < pos.sl) {
+            setPositions((prev) =>
+              prev.map((p) =>
+                p.id === pos.id ? { ...p, sl: newTrailingSl, trailingActivated: true } : p
+              )
+            );
+          }
+        }
       }
     });
-  }, [currentPrice, positions, handleClosePosition, addLog]);
+  }, [currentPrice, positions, handleClosePosition, settings.trailingStopEnabled, addLog]);
 
   // Market Scanner Engine
   useEffect(() => {
@@ -501,15 +529,16 @@ export default function App() {
 
     // Pick top weighted strategy
     const chosen = validDetected[0];
-    const atrVal = analysis.atr || (lastCandle.close * 0.005);
-    const slDist = atrVal * settings.slAtr;
-    const tpDist = atrVal * settings.tpAtr;
-
-    const isLong = chosen.dir === 'LONG';
     const entry = lastCandle.close;
-    const sl = isLong ? entry - slDist : entry + slDist;
-    const tp = isLong ? entry + tpDist : entry - tpDist;
-    const rrRatio = slDist > 0 ? tpDist / slDist : 2.0;
+    const atrVal = analysis.atr || (lastCandle.close * 0.005);
+    const { sl, tp, rrRatio } = calculateStructuralSlTp(
+      candles,
+      entry,
+      chosen.dir,
+      atrVal,
+      settings.slAtr,
+      settings.tpAtr
+    );
 
     const newSignal: TradeSignal = {
       id: `sig-${Date.now()}`,

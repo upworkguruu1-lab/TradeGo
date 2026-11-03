@@ -258,7 +258,7 @@ export function analyzeMarket(candles: Candle[]): MarketAnalysis {
   };
 }
 
-// Strategy detection with strict anti-false-breakout and RSI filtering
+// Strategy detection with strict trend alignment, candle body validation, and anti-noise filters
 export function checkMomentum(
   candles: Candle[],
   analysis: MarketAnalysis
@@ -268,35 +268,51 @@ export function checkMomentum(
   const prev = candles[candles.length - 2];
   const pprev = candles[candles.length - 3];
 
-  // Must have volume confirmation (at least 20% above average)
-  if (last.volume < analysis.volumeAvg * 1.2) return null;
+  const bodySize = Math.abs(last.close - last.open);
+  const candleRange = Math.max(0.0001, last.high - last.low);
 
-  // Bullish momentum: breakout above previous 2 highs, RSI healthy (not overbought > 75)
+  // Must have volume confirmation (at least 15% above average)
+  if (last.volume < analysis.volumeAvg * 1.15) return null;
+
+  // Bullish momentum:
+  // 1. In established uptrend: price > EMA50 and EMA21 >= EMA50
+  // 2. Strong green candle body (conviction, not a topping wick)
+  // 3. Breakout above previous 2 highs
+  // 4. Healthy RSI (48-68, not overbought > 70)
+  // 5. Active trend strength: ADX >= 18
   if (
+    last.close > last.open &&
+    bodySize >= 0.35 * candleRange &&
     last.close > prev.high &&
     last.close > pprev.high &&
-    analysis.rsi < 75 &&
-    analysis.rsi > 45 &&
-    last.close > analysis.ema21
+    last.close > analysis.ema50 &&
+    analysis.ema21 >= analysis.ema50 &&
+    analysis.rsi >= 48 &&
+    analysis.rsi <= 68 &&
+    analysis.adx >= 18
   ) {
     return {
       dir: 'LONG',
-      reason: `Импульсный пробой 2 свечей с объемом x${(last.volume / analysis.volumeAvg).toFixed(1)} (RSI ${analysis.rsi.toFixed(0)})`,
+      reason: `Трендовый импульс вверх с объемом x${(last.volume / analysis.volumeAvg).toFixed(1)} (RSI ${analysis.rsi.toFixed(0)}, ADX ${analysis.adx.toFixed(0)})`,
       strategy: 'MOMENTUM',
     };
   }
 
-  // Bearish momentum: breakout below previous 2 lows, RSI not oversold < 25
+  // Bearish momentum:
   if (
+    last.close < last.open &&
+    bodySize >= 0.35 * candleRange &&
     last.close < prev.low &&
     last.close < pprev.low &&
-    analysis.rsi > 25 &&
-    analysis.rsi < 55 &&
-    last.close < analysis.ema21
+    last.close < analysis.ema50 &&
+    analysis.ema21 <= analysis.ema50 &&
+    analysis.rsi >= 32 &&
+    analysis.rsi <= 52 &&
+    analysis.adx >= 18
   ) {
     return {
       dir: 'SHORT',
-      reason: `Медвежий импульс с объемом x${(last.volume / analysis.volumeAvg).toFixed(1)} (RSI ${analysis.rsi.toFixed(0)})`,
+      reason: `Импульсный пробой вниз по тренду с объемом x${(last.volume / analysis.volumeAvg).toFixed(1)} (RSI ${analysis.rsi.toFixed(0)})`,
       strategy: 'MOMENTUM',
     };
   }
@@ -313,34 +329,35 @@ export function checkVwap(
   const price = last.close;
   const vw = analysis.vwap;
 
-  // Bullish VWAP bounce: low tested VWAP, closed above it with bullish candle body
+  // Bullish VWAP bounce:
+  // Price in uptrend (above EMA50), tested VWAP from above, formed strong green rejection candle
   if (
     price > vw &&
-    last.low <= vw * 1.0015 &&
+    last.low <= vw * 1.002 &&
     last.close > last.open &&
-    analysis.trend === 'up' &&
-    analysis.rsi > 40 &&
-    analysis.rsi < 70
+    price > analysis.ema50 &&
+    analysis.rsi >= 42 &&
+    analysis.rsi <= 68
   ) {
     return {
       dir: 'LONG',
-      reason: 'Чистый отскок от институционального уровня VWAP вверх по тренду',
+      reason: 'Отскок от институциональной линии VWAP в сторону восходящего тренда',
       strategy: 'VWAP',
     };
   }
 
-  // Bearish VWAP rejection: high tested VWAP, closed below with bearish candle
+  // Bearish VWAP rejection:
   if (
     price < vw &&
-    last.high >= vw * 0.9985 &&
+    last.high >= vw * 0.998 &&
     last.close < last.open &&
-    analysis.trend === 'down' &&
-    analysis.rsi < 60 &&
-    analysis.rsi > 30
+    price < analysis.ema50 &&
+    analysis.rsi >= 32 &&
+    analysis.rsi <= 58
   ) {
     return {
       dir: 'SHORT',
-      reason: 'Отбой от линии VWAP вниз в сторону нисходящего тренда',
+      reason: 'Отбой от сопротивления VWAP вниз по нисходящему тренду',
       strategy: 'VWAP',
     };
   }
@@ -358,20 +375,32 @@ export function checkBreak(
   const hh = Math.max(...range.map((c) => c.high));
   const ll = Math.min(...range.map((c) => c.low));
 
-  if (last.volume < analysis.volumeAvg * 1.3) return null;
+  if (last.volume < analysis.volumeAvg * 1.25) return null;
 
-  if (last.close > hh && last.open <= hh && analysis.rsi < 78) {
+  if (
+    last.close > hh &&
+    last.close > last.open &&
+    last.close > analysis.ema50 &&
+    analysis.rsi >= 50 &&
+    analysis.rsi <= 72
+  ) {
     return {
       dir: 'LONG',
-      reason: `Истинный пробой 20-барного диапазона (${hh.toFixed(2)}) с повышенным объемом`,
+      reason: `Истинный пробой диапазона (${hh.toFixed(2)}) с импульсным объемом x${(last.volume / analysis.volumeAvg).toFixed(1)}`,
       strategy: 'BREAK',
     };
   }
 
-  if (last.close < ll && last.open >= ll && analysis.rsi > 22) {
+  if (
+    last.close < ll &&
+    last.close < last.open &&
+    last.close < analysis.ema50 &&
+    analysis.rsi >= 28 &&
+    analysis.rsi <= 50
+  ) {
     return {
       dir: 'SHORT',
-      reason: `Пробой поддержки 20-барного диапазона (${ll.toFixed(2)}) вниз`,
+      reason: `Пробой поддержки диапазона (${ll.toFixed(2)}) вниз на объеме`,
       strategy: 'BREAK',
     };
   }
@@ -388,35 +417,87 @@ export function checkPullback(
   const e9 = analysis.ema9;
   const e21 = analysis.ema21;
 
-  // Bullish pullback: price in uptrend (e9 > e21), dipped to touch e9 or e21, closed green
+  // Bullish pullback: price in strong uptrend (e9 > e21 and price > EMA50), dipped to test e9/e21, closed green
   if (
     e9 > e21 &&
-    last.low <= e9 * 1.001 &&
+    last.close > analysis.ema50 &&
+    last.low <= e9 * 1.002 &&
     last.close > last.open &&
-    analysis.rsi > 45 &&
-    analysis.rsi < 68
+    analysis.rsi >= 46 &&
+    analysis.rsi <= 66
   ) {
     return {
       dir: 'LONG',
-      reason: 'Откат к бычьей скользящей EMA-9 с формированием разворотной свечи',
+      reason: 'Откат к трендовой EMA-9/21 и подтверждение разворота бычьей свечой',
       strategy: 'PULLBACK',
     };
   }
 
-  // Bearish pullback: price in downtrend (e9 < e21), rallied to test e9, closed red
+  // Bearish pullback:
   if (
     e9 < e21 &&
-    last.high >= e9 * 0.999 &&
+    last.close < analysis.ema50 &&
+    last.high >= e9 * 0.998 &&
     last.close < last.open &&
-    analysis.rsi < 55 &&
-    analysis.rsi > 32
+    analysis.rsi >= 34 &&
+    analysis.rsi <= 54
   ) {
     return {
       dir: 'SHORT',
-      reason: 'Тест сопротивления EMA-9 в нисходящем тренде и возврат продавцов',
+      reason: 'Тест сопротивления EMA-9/21 в нисходящем тренде и возврат продавцов',
       strategy: 'PULLBACK',
     };
   }
 
   return null;
 }
+
+// Calculate structural Stop Loss and Take Profit with dynamic 5M swing & volatility adaptation
+export function calculateStructuralSlTp(
+  candles: Candle[],
+  entry: number,
+  dir: Direction,
+  atrVal: number,
+  slMult = 1.4,
+  tpMult = 2.4,
+  timeframe = '5m'
+): { sl: number; tp: number; rrRatio: number; targetGainPct: number } {
+  // On 5m, the ideal lookback for local swing pivots is 8 to 12 candles (40-60 min)
+  const lookback = timeframe === '5m' ? 10 : 8;
+  const recentBars = candles.slice(-lookback);
+
+  // Dynamic noise floor based on 5m ATR: minimum 1.3x ATR to never get stopped by normal wicks
+  const minSlDist = atrVal * Math.max(1.3, slMult);
+  const maxSlDist = atrVal * 2.5;
+
+  if (dir === 'LONG') {
+    // Find dynamic swing low
+    const swingLow = Math.min(...recentBars.map((c) => c.low));
+    // Buffer below swing low
+    let slDist = entry - swingLow + atrVal * 0.25;
+    slDist = Math.max(minSlDist, Math.min(maxSlDist, slDist));
+
+    const sl = entry - slDist;
+    // Dynamic Take Profit: target at least 1.8x to 2.4x the distance of the stop
+    const targetRr = Math.max(1.8, tpMult / Math.max(1, slMult));
+    const tp = entry + slDist * targetRr;
+    const rrRatio = (tp - entry) / slDist;
+    const targetGainPct = ((tp - entry) / entry) * 100;
+
+    return { sl, tp, rrRatio, targetGainPct };
+  } else {
+    // Find dynamic swing high
+    const swingHigh = Math.max(...recentBars.map((c) => c.high));
+    let slDist = swingHigh - entry + atrVal * 0.25;
+    slDist = Math.max(minSlDist, Math.min(maxSlDist, slDist));
+
+    const sl = entry + slDist;
+    const targetRr = Math.max(1.8, tpMult / Math.max(1, slMult));
+    const tp = entry - slDist * targetRr;
+    const rrRatio = (entry - tp) / slDist;
+    const targetGainPct = ((entry - tp) / entry) * 100;
+
+    return { sl, tp, rrRatio, targetGainPct };
+  }
+}
+

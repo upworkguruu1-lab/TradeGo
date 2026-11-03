@@ -65,6 +65,8 @@ export interface UserPosition {
   maxProfitPct: number;
   layer1Done: boolean;
   layer2Done: boolean;   // Break-even moved
+  highestPrice?: number;
+  trailingActivated?: boolean;
 }
 
 export interface ClosedTrade {
@@ -98,6 +100,9 @@ export interface TerminalSettings {
   feeRatePct: number;      // e.g. 0.05%
   slAtr: number;
   tpAtr: number;
+  useDynamicSlTp: boolean;       // Dynamic swing-based SL & volatility-based TP
+  trailingStopEnabled: boolean;  // Trailing stop lock-in as price advances
+  timeframeOptimized: '5m' | 'auto'; // Specialized 5M candle optimization
   useSound: boolean;
   useVoice: boolean;
   usePushNotifications: boolean;

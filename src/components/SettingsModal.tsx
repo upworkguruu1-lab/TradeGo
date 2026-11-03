@@ -241,6 +241,39 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
+          {/* 5M PRO & Dynamic Sizing Toggles */}
+          <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-2 mt-2">
+            <div className="font-bold text-slate-200 text-xs flex items-center justify-between pb-1 border-b border-slate-800/60">
+              <span className="text-amber-400">⚡ Режим 5M PRO & Динамические уровни:</span>
+            </div>
+
+            <label className="flex items-center justify-between cursor-pointer pt-1">
+              <div>
+                <div className="text-slate-200 font-medium">Динамический SL / TP по свингам 5M</div>
+                <div className="text-[10px] text-slate-500">Автоматически прячет стоп за локальный лоу 5м свечей</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={settings.useDynamicSlTp}
+                onChange={(e) => onSave({ useDynamicSlTp: e.target.checked })}
+                className="rounded border-slate-700 bg-slate-800 text-amber-500"
+              />
+            </label>
+
+            <label className="flex items-center justify-between cursor-pointer">
+              <div>
+                <div className="text-slate-200 font-medium">Динамический Трейлинг-Стоп</div>
+                <div className="text-[10px] text-slate-500">Подтягивает стоп вслед за ростом цены, защищая накопленную прибыль</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={settings.trailingStopEnabled}
+                onChange={(e) => onSave({ trailingStopEnabled: e.target.checked })}
+                className="rounded border-slate-700 bg-slate-800 text-amber-500"
+              />
+            </label>
+          </div>
+
           {/* Audio Toggles */}
           <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-2 mt-2">
             <label className="flex items-center justify-between cursor-pointer">

@@ -14,7 +14,15 @@ import {
   AlertTriangle,
   Zap,
 } from 'lucide-react';
-import { analyzeMarket, atr } from '../utils/indicators';
+import {
+  analyzeMarket,
+  atr,
+  checkMomentum,
+  checkVwap,
+  checkBreak,
+  checkPullback,
+  calculateStructuralSlTp,
+} from '../utils/indicators';
 
 interface StrategyPanelProps {
   candles: Candle[];
@@ -77,79 +85,164 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
   ];
 
   const runBacktest = () => {
-    if (candles.length < 80) return;
+    if (candles.length < 50) return;
     setIsBacktesting(true);
 
     setTimeout(() => {
-      let bestScore = -999;
-      let bestConfig = { sl: 0.6, tp: 1.8, trades: 0, winRate: 0, netPnl: 0 };
+      let bestScore = -999999;
+      let bestConfig = { sl: 1.4, tp: 2.4, trades: 0, winRate: 0, netPnl: 0 };
 
-      const slVariants = [0.4, 0.6, 0.8, 1.0];
-      const tpVariants = [1.2, 1.8, 2.4, 3.0];
+      // Test realistic structural multipliers that give price breathing room above noise
+      const slVariants = [1.2, 1.4, 1.6, 1.8];
+      const tpVariants = [1.8, 2.2, 2.8, 3.4];
 
-      const feeRoundTrip = settings.feeRatePct * 2 * settings.leverage;
+      const effLev = settings.marketType === 'spot' ? 1 : settings.leverage;
+      const feeRoundTrip = settings.feeRatePct * 2 * effLev;
 
       for (const slMult of slVariants) {
         for (const tpMult of tpVariants) {
           let trades = 0;
           let wins = 0;
           let netPnl = 0;
+          let lastTradeCandleIdx = -99;
 
-          // Simple simulation over candles
-          for (let i = 40; i < candles.length - 5; i += 3) {
+          // Scan across historical candles
+          for (let i = 25; i < candles.length - 12; i++) {
+            // Anti-churn cooldown: at least 4 candles between entries
+            if (i - lastTradeCandleIdx < 4) continue;
+
             const slice = candles.slice(0, i + 1);
             const analysis = analyzeMarket(slice);
-            const atrv = atr(slice, 14);
-            const atrVal = atrv[atrv.length - 1] ?? slice[slice.length - 1].close * 0.005;
+            const lastC = slice[slice.length - 1];
 
-            const c = slice[slice.length - 1];
-            // Simulate trend entry
-            if (analysis.adx > 20 && analysis.spread < 0.15) {
-              const isLong = analysis.trend === 'up';
-              const entry = c.close;
-              const sl = isLong ? entry - atrVal * slMult : entry + atrVal * slMult;
-              const tp = isLong ? entry + atrVal * tpMult : entry - atrVal * tpMult;
+            // Filter by active strategies
+            const detected: { dir: 'LONG' | 'SHORT'; strategy: StrategyName }[] = [];
+            if (settings.activeStrategies.MOMENTUM) {
+              const s = checkMomentum(slice, analysis);
+              if (s) detected.push(s);
+            }
+            if (settings.activeStrategies.VWAP) {
+              const s = checkVwap(slice, analysis);
+              if (s) detected.push(s);
+            }
+            if (settings.activeStrategies.BREAK) {
+              const s = checkBreak(slice, analysis);
+              if (s) detected.push(s);
+            }
+            if (settings.activeStrategies.PULLBACK) {
+              const s = checkPullback(slice, analysis);
+              if (s) detected.push(s);
+            }
 
-              // Check next 10 candles
-              for (let j = i + 1; j < Math.min(candles.length, i + 10); j++) {
-                const nextC = candles[j];
-                if (isLong) {
-                  if (nextC.low <= sl) {
-                    trades++;
-                    const gross = ((sl - entry) / entry) * 100 * settings.leverage;
-                    netPnl += gross - feeRoundTrip;
-                    break;
-                  }
-                  if (nextC.high >= tp) {
-                    trades++;
-                    wins++;
-                    const gross = ((tp - entry) / entry) * 100 * settings.leverage;
-                    netPnl += gross - feeRoundTrip;
-                    break;
-                  }
-                } else {
-                  if (nextC.high >= sl) {
-                    trades++;
-                    const gross = ((entry - sl) / entry) * 100 * settings.leverage;
-                    netPnl += gross - feeRoundTrip;
-                    break;
-                  }
-                  if (nextC.low <= tp) {
-                    trades++;
-                    wins++;
-                    const gross = ((entry - tp) / entry) * 100 * settings.leverage;
-                    netPnl += gross - feeRoundTrip;
-                    break;
-                  }
+            // Spot Mode: Only LONG allowed
+            const valid = settings.marketType === 'spot'
+              ? detected.filter((d) => d.dir === 'LONG')
+              : detected;
+
+            if (valid.length === 0) continue;
+
+            const chosen = valid[0];
+            const entry = lastC.close;
+            const atrVal = analysis.atr || (entry * 0.005);
+
+            const { sl, tp } = calculateStructuralSlTp(
+              slice,
+              entry,
+              chosen.dir,
+              atrVal,
+              slMult,
+              tpMult
+            );
+
+            let tradeSl = sl;
+            let breakEvenTriggered = false;
+            let closed = false;
+
+            // Follow the trade for up to 15 candles
+            for (let j = i + 1; j < Math.min(candles.length, i + 16); j++) {
+              const c = candles[j];
+
+              if (chosen.dir === 'LONG') {
+                // Check break-even move (if price reached halfway to TP)
+                if (!breakEvenTriggered && c.high >= entry + (tp - entry) * 0.5) {
+                  tradeSl = entry * 1.0005;
+                  breakEvenTriggered = true;
+                }
+
+                // Check Stop Loss
+                if (c.low <= tradeSl) {
+                  trades++;
+                  const exitPrice = tradeSl;
+                  const grossPct = ((exitPrice - entry) / entry) * 100 * effLev;
+                  const net = grossPct - feeRoundTrip;
+                  netPnl += net;
+                  if (net > 0) wins++;
+                  lastTradeCandleIdx = j;
+                  closed = true;
+                  break;
+                }
+
+                // Check Take Profit
+                if (c.high >= tp) {
+                  trades++;
+                  wins++;
+                  const grossPct = ((tp - entry) / entry) * 100 * effLev;
+                  const net = grossPct - feeRoundTrip;
+                  netPnl += net;
+                  lastTradeCandleIdx = j;
+                  closed = true;
+                  break;
+                }
+              } else {
+                // SHORT
+                if (!breakEvenTriggered && c.low <= entry - (entry - tp) * 0.5) {
+                  tradeSl = entry * 0.9995;
+                  breakEvenTriggered = true;
+                }
+
+                if (c.high >= tradeSl) {
+                  trades++;
+                  const exitPrice = tradeSl;
+                  const grossPct = ((entry - exitPrice) / entry) * 100 * effLev;
+                  const net = grossPct - feeRoundTrip;
+                  netPnl += net;
+                  if (net > 0) wins++;
+                  lastTradeCandleIdx = j;
+                  closed = true;
+                  break;
+                }
+
+                if (c.low <= tp) {
+                  trades++;
+                  wins++;
+                  const grossPct = ((entry - tp) / entry) * 100 * effLev;
+                  const net = grossPct - feeRoundTrip;
+                  netPnl += net;
+                  lastTradeCandleIdx = j;
+                  closed = true;
+                  break;
                 }
               }
+            }
+
+            // If trade did not hit SL or TP within 15 candles, close at market
+            if (!closed && i + 15 < candles.length) {
+              const exitCandle = candles[i + 15];
+              trades++;
+              const pDelta = chosen.dir === 'LONG' ? (exitCandle.close - entry) : (entry - exitCandle.close);
+              const grossPct = (pDelta / entry) * 100 * effLev;
+              const net = grossPct - feeRoundTrip;
+              netPnl += net;
+              if (net > 0) wins++;
+              lastTradeCandleIdx = i + 15;
             }
           }
 
           const wr = trades > 0 ? (wins / trades) * 100 : 0;
-          const score = netPnl * 0.7 + wr * 0.3;
+          // Score prioritizes positive net P&L and solid win rate
+          const score = (netPnl * 1.5) + (wr * 0.5);
 
-          if (score > bestScore && trades >= 3) {
+          if (trades >= 2 && score > bestScore) {
             bestScore = score;
             bestConfig = {
               sl: slMult,
