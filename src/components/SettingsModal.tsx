@@ -79,6 +79,48 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
+          {/* Market Type: Spot vs Futures */}
+          <div className="space-y-1.5">
+            <label className="text-slate-400 font-medium">Рынок и кредитное плечо:</label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => onSave({ marketType: 'spot', leverage: 1 })}
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  settings.marketType === 'spot'
+                    ? 'bg-emerald-500/10 border-emerald-500 text-emerald-400'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                }`}
+              >
+                <div className="font-bold text-xs flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                  Спот (Без плеча, 1x)
+                </div>
+                <div className="text-[10px] text-slate-400 mt-1">
+                  Торговля собственными средствами. Только покупки (LONG). Риск ликвидации 0%.
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onSave({ marketType: 'futures', leverage: Math.max(2, settings.leverage) })}
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  settings.marketType === 'futures'
+                    ? 'bg-amber-500/10 border-amber-500 text-amber-400'
+                    : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                }`}
+              >
+                <div className="font-bold text-xs flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-400" />
+                  Фьючерсы (С плечом)
+                </div>
+                <div className="text-[10px] text-slate-400 mt-1">
+                  Маржинальная торговля с плечом. Сигналы в обе стороны (LONG и SHORT).
+                </div>
+              </button>
+            </div>
+          </div>
+
           <div className="h-px bg-slate-800 my-2" />
 
           {/* Risk Management */}
@@ -109,16 +151,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
 
             <div className="space-y-1">
-              <label className="text-slate-400">Кредитное плечо (x):</label>
-              <input
-                type="number"
-                min="1"
-                max="50"
-                step="1"
-                value={settings.leverage}
-                onChange={(e) => onSave({ leverage: parseInt(e.target.value, 10) || 5 })}
-                className="w-full p-2 rounded bg-slate-950 border border-slate-800 font-mono text-slate-100"
-              />
+              <label className="text-slate-400">Кредитное плечо:</label>
+              {settings.marketType === 'spot' ? (
+                <div className="p-2 rounded bg-slate-950 border border-slate-800 font-mono text-emerald-400 font-bold">
+                  1x (Без плеча, Спот)
+                </div>
+              ) : (
+                <input
+                  type="number"
+                  min="2"
+                  max="50"
+                  step="1"
+                  value={settings.leverage}
+                  onChange={(e) => onSave({ leverage: parseInt(e.target.value, 10) || 5 })}
+                  className="w-full p-2 rounded bg-slate-950 border border-slate-800 font-mono text-slate-100"
+                />
+              )}
             </div>
 
             <div className="space-y-1">
@@ -137,8 +185,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           <div className="h-px bg-slate-800 my-2" />
 
-          {/* SL / TP & TTL */}
-          <div className="grid grid-cols-3 gap-3">
+          {/* SL / TP & Overtrading protections */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="space-y-1">
               <label className="text-slate-400">Stop-Loss (ATR):</label>
               <input
@@ -175,6 +223,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 value={settings.signalTtlSec}
                 onChange={(e) => onSave({ signalTtlSec: parseInt(e.target.value, 10) || 90 })}
                 className="w-full p-2 rounded bg-slate-950 border border-slate-800 font-mono text-slate-100"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-slate-400">Пауза между сделками:</label>
+              <input
+                type="number"
+                min="10"
+                max="600"
+                step="10"
+                value={settings.cooldownSec}
+                onChange={(e) => onSave({ cooldownSec: parseInt(e.target.value, 10) || 60 })}
+                title="Кулдаун в секундах после закрытия сделки, чтобы избежать череды ложных входов"
+                className="w-full p-2 rounded bg-slate-950 border border-slate-800 font-mono text-amber-400 font-semibold"
               />
             </div>
           </div>

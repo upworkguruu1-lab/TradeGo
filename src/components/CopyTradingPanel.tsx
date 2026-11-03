@@ -113,6 +113,19 @@ export const CopyTradingPanel: React.FC<CopyTradingPanelProps> = ({
 
       {/* Quick Settings & Risk Calculator Bar */}
       <div className="p-3 bg-slate-950/60 border-b border-slate-800 space-y-2">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-slate-400">Режим торговли:</span>
+          {settings.marketType === 'spot' ? (
+            <span className="font-bold text-emerald-400 font-mono text-[10px] bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/30">
+              🟢 СПОТ 1x (Свои средства, LONG)
+            </span>
+          ) : (
+            <span className="font-bold text-amber-400 font-mono text-[10px] bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/30">
+              ⚡ ФЬЮЧЕРСЫ {settings.leverage}x (LONG/SHORT)
+            </span>
+          )}
+        </div>
+
         <div className="flex items-center justify-between text-[11px] text-slate-400">
           <span>Депозит:</span>
           <span className="font-mono text-slate-200 font-semibold">${settings.depositUsd} USDT</span>
@@ -124,8 +137,10 @@ export const CopyTradingPanel: React.FC<CopyTradingPanelProps> = ({
           </span>
         </div>
         <div className="flex items-center justify-between text-[11px] text-slate-400">
-          <span>Плечо:</span>
-          <span className="font-mono text-slate-200 font-medium">{settings.leverage}x</span>
+          <span>Лимиты частоты:</span>
+          <span className="font-mono text-slate-300 text-[10px]">
+            1 сд / монета · Пауза {settings.cooldownSec}с
+          </span>
         </div>
 
         {/* Auto Confirm Toggle */}

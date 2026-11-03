@@ -91,6 +91,7 @@ export interface TerminalSettings {
   symbol: string;
   timeframe: Timeframe;
   botMode: 'turbo' | 'standard' | 'safe';
+  marketType: 'spot' | 'futures';   // 'spot' = 1x leverage, only LONG; 'futures' = leverage, LONG & SHORT
   depositUsd: number;
   riskPct: number;
   leverage: number;
@@ -102,6 +103,8 @@ export interface TerminalSettings {
   usePushNotifications: boolean;
   autoCopy: boolean;
   signalTtlSec: number;
+  cooldownSec: number;     // cooldown between trades in seconds
+  maxPositions: number;    // max concurrent positions
   activeStrategies: Record<StrategyName, boolean>;
 }
 

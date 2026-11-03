@@ -42,9 +42,10 @@ const DEFAULT_SETTINGS: TerminalSettings = {
   symbol: 'PAXGUSDT',
   timeframe: '5m',
   botMode: 'turbo',
+  marketType: 'spot', // Default to safe spot trading (1x leverage, only LONG)
   depositUsd: 1000,
   riskPct: 1.0,
-  leverage: 5,
+  leverage: 1, // 1x for spot (own funds)
   feeRatePct: 0.05,
   slAtr: 0.6,
   tpAtr: 1.8,
@@ -53,6 +54,8 @@ const DEFAULT_SETTINGS: TerminalSettings = {
   usePushNotifications: false,
   autoCopy: false,
   signalTtlSec: 90,
+  cooldownSec: 60, // 60 seconds cooldown after trade exit
+  maxPositions: 1, // Max 1 active position at a time
   activeStrategies: {
     MOMENTUM: true,
     VWAP: true,
@@ -194,6 +197,7 @@ export default function App() {
 
   const streamRef = useRef<MarketStreamManager | null>(null);
   const lastScanRef = useRef<number>(0);
+  const lastExitTimeRef = useRef<number>(0);
 
   const addLog = useCallback((text: string, type = 'info') => {
     const time = new Date().toLocaleTimeString('ru-RU');
@@ -374,6 +378,8 @@ export default function App() {
         };
       });
 
+      lastExitTimeRef.current = Date.now();
+
       if (settings.useSound) {
         playChime(isWin ? 'win' : 'loss');
       }
@@ -439,6 +445,26 @@ export default function App() {
     if (now - lastScanRef.current < 3500) return;
     lastScanRef.current = now;
 
+    // Anti-overtrading Guard 1: Do not create signals if max positions reached
+    if (positions.length >= settings.maxPositions) {
+      return;
+    }
+
+    // Anti-overtrading Guard 2: If we ALREADY hold an active position on this symbol, do NOT open another
+    if (positions.some((p) => p.symbol === settings.symbol)) {
+      return;
+    }
+
+    // Anti-overtrading Guard 3: If an unexpired signal is already active for this symbol, do NOT spam another
+    if (signals.some((s) => s.symbol === settings.symbol && s.expiresAt > now)) {
+      return;
+    }
+
+    // Anti-overtrading Guard 4: Cooldown period after previous trade closure (avoids re-entering same chop)
+    if (lastExitTimeRef.current && now - lastExitTimeRef.current < settings.cooldownSec * 1000) {
+      return;
+    }
+
     const analysis = analyzeMarket(candles);
     const lastCandle = candles[candles.length - 1];
 
@@ -466,10 +492,15 @@ export default function App() {
       if (s) detected.push(s);
     }
 
-    if (detected.length === 0) return;
+    // Spot Mode Filter: on Spot you cannot short; ONLY LONG dip-buys and breakouts are allowed!
+    const validDetected = settings.marketType === 'spot'
+      ? detected.filter((s) => s.dir === 'LONG')
+      : detected;
+
+    if (validDetected.length === 0) return;
 
     // Pick top weighted strategy
-    const chosen = detected[0];
+    const chosen = validDetected[0];
     const atrVal = analysis.atr || (lastCandle.close * 0.005);
     const slDist = atrVal * settings.slAtr;
     const tpDist = atrVal * settings.tpAtr;
@@ -479,12 +510,6 @@ export default function App() {
     const sl = isLong ? entry - slDist : entry + slDist;
     const tp = isLong ? entry + tpDist : entry - tpDist;
     const rrRatio = slDist > 0 ? tpDist / slDist : 2.0;
-
-    // Check if duplicate signal already exists
-    const isDup = signals.some(
-      (s) => s.symbol === settings.symbol && s.dir === chosen.dir && Math.abs(s.entry - entry) < atrVal * 0.2
-    );
-    if (isDup) return;
 
     const newSignal: TradeSignal = {
       id: `sig-${Date.now()}`,
@@ -502,7 +527,7 @@ export default function App() {
       analysis,
     };
 
-    setSignals((prev) => [newSignal, ...prev.slice(0, 5)]);
+    setSignals((prev) => [newSignal, ...prev.slice(0, 3)]);
 
     if (settings.useSound) {
       playChime('signal');
@@ -533,16 +558,24 @@ export default function App() {
     settings,
     mlState,
     signals,
+    positions,
     addLog,
   ]);
 
   // User Confirms Signal to copy trade
   const handleConfirmSignal = (sig: TradeSignal) => {
+    // If already in a position for this symbol, block duplicate position spam
+    if (positions.some((p) => p.symbol === sig.symbol)) {
+      addLog(`Позиция по ${sig.symbol} уже открыта. Дополнительный вход заблокирован.`, 'info');
+      return;
+    }
+
+    const effectiveLev = settings.marketType === 'spot' ? 1 : settings.leverage;
     // Calculate margin and contracts
     const riskAmount = (settings.depositUsd * (settings.riskPct / 100));
     const slDistPct = Math.abs(sig.entry - sig.sl) / sig.entry;
     const marginUsd = slDistPct > 0 ? Math.min(settings.depositUsd, riskAmount / slDistPct) : 100;
-    const contracts = (marginUsd * settings.leverage) / sig.entry;
+    const contracts = (marginUsd * effectiveLev) / sig.entry;
 
     const newPosition: UserPosition = {
       id: `pos-${Date.now()}`,
@@ -557,7 +590,7 @@ export default function App() {
       reason: sig.reason,
       sizeUsd: marginUsd,
       contracts,
-      leverage: settings.leverage,
+      leverage: effectiveLev,
       feeRate: settings.feeRatePct / 100,
       entryTime: Date.now(),
       maxProfitPct: 0,
