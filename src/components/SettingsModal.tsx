@@ -272,6 +272,92 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 className="rounded border-slate-700 bg-slate-800 text-amber-500"
               />
             </label>
+
+            <label className="flex items-center justify-between cursor-pointer">
+              <div>
+                <div className="text-slate-200 font-medium">Моно-фокус: Только активная пара</div>
+                <div className="text-[10px] text-slate-500">Бот торгует строго выбранную пару {settings.symbol}, не распыляя депозит</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={settings.singlePairMode ?? true}
+                onChange={(e) => onSave({ singlePairMode: e.target.checked })}
+                className="rounded border-slate-700 bg-slate-800 text-amber-500"
+              />
+            </label>
+          </div>
+
+          {/* Daily Session Target & Circuit Breaker */}
+          <div className="p-3 bg-gradient-to-br from-amber-950/20 to-slate-950 rounded-lg border border-amber-500/30 space-y-3 mt-2">
+            <div className="font-bold text-amber-300 text-xs flex items-center justify-between pb-1 border-b border-amber-500/20">
+              <span className="flex items-center gap-1.5">
+                <Shield className="w-3.5 h-3.5 text-amber-400" />
+                Дневная сессия & Защита прибыли (Circuit Breaker):
+              </span>
+              <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 font-mono">1 ДЕНЬ</span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <label className="text-emerald-400 font-medium text-[11px] flex items-center justify-between">
+                  <span>Цель дня (Daily Take-Profit):</span>
+                  <span className="font-mono font-bold">+{settings.dailyTargetPct || 5}%</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min="1"
+                    max="15"
+                    step="0.5"
+                    value={settings.dailyTargetPct || 5}
+                    onChange={(e) => onSave({ dailyTargetPct: parseFloat(e.target.value) || 5 })}
+                    className="w-full accent-emerald-500"
+                  />
+                </div>
+                <div className="text-[10px] text-slate-500">При достижении +{settings.dailyTargetPct || 5}% профита за день торги фиксируются</div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-rose-400 font-medium text-[11px] flex items-center justify-between">
+                  <span>Стоп-лимит дня (Circuit Breaker):</span>
+                  <span className="font-mono font-bold">-{settings.maxDailyLossPct || 3}%</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min="1"
+                    max="8"
+                    step="0.5"
+                    value={settings.maxDailyLossPct || 3}
+                    onChange={(e) => onSave({ maxDailyLossPct: parseFloat(e.target.value) || 3 })}
+                    className="w-full accent-rose-500"
+                  />
+                </div>
+                <div className="text-[10px] text-slate-500">Защита от тильта: остановка при просадке -{settings.maxDailyLossPct || 3}%</div>
+              </div>
+            </div>
+
+            <div className="space-y-2 pt-1 border-t border-slate-800/80">
+              <label className="flex items-center justify-between cursor-pointer">
+                <span className="text-slate-300 text-[11px]">Авто-блокировка сессии при взятии цели дня (+{settings.dailyTargetPct || 5}%)</span>
+                <input
+                  type="checkbox"
+                  checked={settings.autoStopOnTarget ?? true}
+                  onChange={(e) => onSave({ autoStopOnTarget: e.target.checked })}
+                  className="rounded border-slate-700 bg-slate-800 text-emerald-500"
+                />
+              </label>
+
+              <label className="flex items-center justify-between cursor-pointer">
+                <span className="text-slate-300 text-[11px]">Авто-блокировка при достижении лимита убытка (-{settings.maxDailyLossPct || 3}%)</span>
+                <input
+                  type="checkbox"
+                  checked={settings.autoStopOnLoss ?? true}
+                  onChange={(e) => onSave({ autoStopOnLoss: e.target.checked })}
+                  className="rounded border-slate-700 bg-slate-800 text-rose-500"
+                />
+              </label>
+            </div>
           </div>
 
           {/* Audio Toggles */}

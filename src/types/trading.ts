@@ -89,6 +89,19 @@ export interface ClosedTrade {
   isUserTrade?: boolean;
 }
 
+export interface SessionStats {
+  sessionStart: number;          // timestamp начала сессии
+  sessionPnlUsd: number;         // накопленный P&L за сессию в долларах
+  sessionPnlPct: number;         // накопленный P&L за сессию в % от депозита
+  sessionTradesCount: number;    // количество закрытых сделок
+  sessionWins: number;           // число прибыльных сделок
+  sessionLosses: number;         // число убыточных сделок
+  sessionWinRate: number;        // win rate %
+  status: 'ACTIVE' | 'TARGET_REACHED' | 'LOSS_LIMIT';
+  targetReachedAt?: number;
+  lossLimitReachedAt?: number;
+}
+
 export interface TerminalSettings {
   symbol: string;
   timeframe: Timeframe;
@@ -103,6 +116,11 @@ export interface TerminalSettings {
   useDynamicSlTp: boolean;       // Dynamic swing-based SL & volatility-based TP
   trailingStopEnabled: boolean;  // Trailing stop lock-in as price advances
   timeframeOptimized: '5m' | 'auto'; // Specialized 5M candle optimization
+  dailyTargetPct: number;        // Цель дневной сессии в % (например, +5%)
+  maxDailyLossPct: number;       // Максимальная дневная просадка в % (например, -3%)
+  autoStopOnTarget: boolean;     // Авто-остановка при достижении цели дня
+  autoStopOnLoss: boolean;       // Защитный Circuit Breaker при лимите убытка
+  singlePairMode: boolean;       // Торговать только выбранную в терминале пару (без распыления)
   useSound: boolean;
   useVoice: boolean;
   usePushNotifications: boolean;

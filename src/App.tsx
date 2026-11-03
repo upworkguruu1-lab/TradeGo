@@ -5,6 +5,7 @@ import {
   DaySummary,
   Direction,
   MLState,
+  SessionStats,
   StrategyName,
   TerminalSettings,
   Timeframe,
@@ -32,6 +33,7 @@ import {
 } from './utils/sound';
 
 import { Header } from './components/Header';
+import { DailySessionCard } from './components/DailySessionCard';
 import { ChartCanvas } from './components/ChartCanvas';
 import { CopyTradingPanel } from './components/CopyTradingPanel';
 import { StrategyPanel } from './components/StrategyPanel';
@@ -53,6 +55,11 @@ const DEFAULT_SETTINGS: TerminalSettings = {
   useDynamicSlTp: true,
   trailingStopEnabled: true,
   timeframeOptimized: '5m',
+  dailyTargetPct: 5.0, // Цель сессии за 1 день: +5.0%
+  maxDailyLossPct: 3.0, // Защитный Circuit Breaker дня: -3.0%
+  autoStopOnTarget: true,
+  autoStopOnLoss: true,
+  singlePairMode: true, // Торговать только выбранную в терминале пару
   useSound: true,
   useVoice: true,
   usePushNotifications: false,
@@ -235,6 +242,81 @@ export default function App() {
       localStorage.setItem('scalpmaster_strat_stats', JSON.stringify(strategyStats));
     } catch {}
   }, [strategyStats]);
+
+  const [sessionStartTime, setSessionStartTime] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('scalpmaster_session_start');
+      if (saved) return parseInt(saved, 10);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      return today.getTime();
+    } catch {
+      return Date.now() - 24 * 3600 * 1000;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('scalpmaster_session_start', sessionStartTime.toString());
+    } catch {}
+  }, [sessionStartTime]);
+
+  const notifiedStatusRef = useRef<'NONE' | 'TARGET' | 'LOSS'>('NONE');
+
+  // Compute session metrics from closed trades since sessionStartTime
+  const sessionTrades = history.filter((t) => t.exitTime >= sessionStartTime);
+  const sessionPnlUsd = sessionTrades.reduce((acc, t) => acc + t.pnlUsd, 0);
+  const sessionPnlPct = settings.depositUsd > 0 ? (sessionPnlUsd / settings.depositUsd) * 100 : 0;
+  const sessionWins = sessionTrades.filter((t) => t.pnlNetPct > 0).length;
+  const sessionLosses = sessionTrades.filter((t) => t.pnlNetPct <= 0).length;
+  const sessionTradesCount = sessionTrades.length;
+  const sessionWinRate = sessionTradesCount > 0 ? (sessionWins / sessionTradesCount) * 100 : 0;
+
+  const targetPct = settings.dailyTargetPct || 5.0;
+  const maxLossPct = settings.maxDailyLossPct || 3.0;
+
+  let sessionStatus: SessionStats['status'] = 'ACTIVE';
+  if (settings.autoStopOnTarget && sessionPnlPct >= targetPct) {
+    sessionStatus = 'TARGET_REACHED';
+  } else if (settings.autoStopOnLoss && sessionPnlPct <= -maxLossPct) {
+    sessionStatus = 'LOSS_LIMIT';
+  }
+
+  const sessionStats: SessionStats = {
+    sessionStart: sessionStartTime,
+    sessionPnlUsd,
+    sessionPnlPct,
+    sessionTradesCount,
+    sessionWins,
+    sessionLosses,
+    sessionWinRate,
+    status: sessionStatus,
+  };
+
+  // Watch for session target or stop triggers
+  useEffect(() => {
+    if (sessionStatus === 'TARGET_REACHED' && notifiedStatusRef.current !== 'TARGET') {
+      notifiedStatusRef.current = 'TARGET';
+      if (settings.useSound) playChime('win');
+      if (settings.useVoice) {
+        speakAlert(`Поздравляю! Дневная цель прибыли ${sessionPnlPct.toFixed(1)} процентов успешно достигнута. Торги зафиксированы.`);
+      }
+      addLog(`🎉 ДНЕВНАЯ ЦЕЛЬ ДОСТИГНУТА! Прибыль за сессию: +${sessionPnlPct.toFixed(2)}% ($${sessionPnlUsd.toFixed(1)}). Защита прибыли активна.`, 'win');
+    } else if (sessionStatus === 'LOSS_LIMIT' && notifiedStatusRef.current !== 'LOSS') {
+      notifiedStatusRef.current = 'LOSS';
+      if (settings.useSound) playChime('loss');
+      if (settings.useVoice) {
+        speakAlert(`Внимание. Сработал дневной лимит защиты капитала. Торги приостановлены.`);
+      }
+      addLog(`🛡️ Сработал Circuit Breaker (лимит -${maxLossPct}%). Торги заблокированы для защиты депозита.`, 'loss');
+    }
+  }, [sessionStatus, sessionPnlPct, sessionPnlUsd, maxLossPct, settings.useSound, settings.useVoice, addLog]);
+
+  const handleResetSession = useCallback(() => {
+    setSessionStartTime(Date.now());
+    notifiedStatusRef.current = 'NONE';
+    addLog('🔄 Торговая сессия сброшена. Начат новый торговый день!');
+  }, [addLog]);
 
   // Clean expired signals automatically
   useEffect(() => {
@@ -469,6 +551,14 @@ export default function App() {
   useEffect(() => {
     if (!isRunning || candles.length < 30) return;
 
+    // Daily Session Protection Guard: Stop scanning if daily target reached or loss limit hit
+    if (sessionStatus === 'TARGET_REACHED' && settings.autoStopOnTarget) {
+      return;
+    }
+    if (sessionStatus === 'LOSS_LIMIT' && settings.autoStopOnLoss) {
+      return;
+    }
+
     const now = Date.now();
     if (now - lastScanRef.current < 3500) return;
     lastScanRef.current = now;
@@ -496,9 +586,33 @@ export default function App() {
     const analysis = analyzeMarket(candles);
     const lastCandle = candles[candles.length - 1];
 
-    // Filter checks: Spread and ADX
+    // 1. Фильтр по спреду и микро-волатильности (Spread Filter)
+    // Отсекаем как аномально широкий спред (проскальзывание), так и "мертвый" спред (боковик без движения)
     if (analysis.spread > mlState.params.spreadMax) return;
+    if (analysis.spread < 0.02 || (analysis.bbWidth < 0.35 && analysis.adx < 18)) {
+      return; // Мертвый боковик без волатильности
+    }
+
     if (settings.botMode === 'safe' && analysis.adx < 22) return;
+
+    // 2. Подтверждение объёма для 5M: отсекаем ложные пробои на пустом стакане
+    const isVolumeSupported = lastCandle.volume >= (analysis.volumeAvg * 1.05);
+    if (!isVolumeSupported && analysis.adx < 20 && settings.botMode === 'safe') {
+      return;
+    }
+
+    // 3. Фильтр по направлению тренда (EMA 20/50) и отсечению боковика
+    const emaFast = analysis.ema21; // EMA 20/21
+    const emaSlow = analysis.ema50; // EMA 50
+    const emaDistPct = (Math.abs(emaFast - emaSlow) / emaSlow) * 100;
+    const isEmaUptrend = emaFast > emaSlow && lastCandle.close > emaSlow;
+    const isEmaDowntrend = emaFast < emaSlow && lastCandle.close < emaSlow;
+
+    // Защита от боковика: если скользящие EMA 20 и EMA 50 сплетены (дистанция < 0.06%), рынок в распиле
+    const isSidewaysChop = emaDistPct < 0.06 && analysis.adx < 20;
+    if (isSidewaysChop) {
+      return; // Сигнал в боковике заблокирован
+    }
 
     // Check Strategy Setups
     const detected: { dir: Direction; reason: string; strategy: StrategyName }[] = [];
@@ -520,10 +634,21 @@ export default function App() {
       if (s) detected.push(s);
     }
 
+    // 3. Строгий фильтр направления: сделка должна строго совпадать с наклоном EMA 20/50
+    const trendFiltered = detected.filter((s) => {
+      if (s.dir === 'LONG') {
+        return isEmaUptrend;
+      }
+      if (s.dir === 'SHORT') {
+        return isEmaDowntrend;
+      }
+      return false;
+    });
+
     // Spot Mode Filter: on Spot you cannot short; ONLY LONG dip-buys and breakouts are allowed!
     const validDetected = settings.marketType === 'spot'
-      ? detected.filter((s) => s.dir === 'LONG')
-      : detected;
+      ? trendFiltered.filter((s) => s.dir === 'LONG')
+      : trendFiltered;
 
     if (validDetected.length === 0) return;
 
@@ -588,6 +713,7 @@ export default function App() {
     mlState,
     signals,
     positions,
+    sessionStatus,
     addLog,
   ]);
 
@@ -685,8 +811,18 @@ export default function App() {
         <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
           {activeTab === 'overview' && (
             <div className="flex-1 flex flex-col h-full overflow-hidden">
-              {/* Candlestick Interactive Chart (Takes ~65% of viewport) */}
-              <div className="flex-1 min-h-[380px] relative">
+              {/* Daily Session Target & Circuit Breaker Hub */}
+              <div className="p-2.5 pb-0 shrink-0">
+                <DailySessionCard
+                  sessionStats={sessionStats}
+                  settings={settings}
+                  onResetSession={handleResetSession}
+                  onOpenSettings={() => setIsSettingsOpen(true)}
+                />
+              </div>
+
+              {/* Candlestick Interactive Chart (Takes primary viewport) */}
+              <div className="flex-1 min-h-[320px] relative mt-2">
                 <ChartCanvas
                   candles={candles}
                   timeframe={settings.timeframe}
@@ -708,30 +844,28 @@ export default function App() {
                   {currentAnalysis ? (
                     <div className="grid grid-cols-2 gap-2 text-[11px] font-mono">
                       <div className="bg-slate-900 p-2 rounded border border-slate-800/80">
-                        <div className="text-slate-500 text-[10px]">Режим:</div>
+                        <div className="text-slate-500 text-[10px]">Режим рынка:</div>
                         <div className="font-bold text-amber-400">{currentAnalysis.mode}</div>
+                      </div>
+                      <div className="bg-slate-900 p-2 rounded border border-slate-800/80">
+                        <div className="text-slate-500 text-[10px]">Тренд EMA 20/50:</div>
+                        <div
+                          className={`font-bold ${
+                            currentAnalysis.ema21 > currentAnalysis.ema50
+                              ? 'text-emerald-400'
+                              : 'text-rose-400'
+                          }`}
+                        >
+                          {currentAnalysis.ema21 > currentAnalysis.ema50 ? '🟢 ВВЕРХ (UP)' : '🔴 ВНИЗ (DOWN)'}
+                        </div>
+                      </div>
+                      <div className="bg-slate-900 p-2 rounded border border-slate-800/80">
+                        <div className="text-slate-500 text-[10px]">Спред свечи:</div>
+                        <div className="font-bold text-slate-200">{currentAnalysis.spread.toFixed(3)}%</div>
                       </div>
                       <div className="bg-slate-900 p-2 rounded border border-slate-800/80">
                         <div className="text-slate-500 text-[10px]">Сила ADX:</div>
                         <div className="font-bold text-sky-400">{currentAnalysis.adx.toFixed(1)}</div>
-                      </div>
-                      <div className="bg-slate-900 p-2 rounded border border-slate-800/80">
-                        <div className="text-slate-500 text-[10px]">Волатильность ATR:</div>
-                        <div className="font-bold text-slate-200">{currentAnalysis.atr.toFixed(2)}</div>
-                      </div>
-                      <div className="bg-slate-900 p-2 rounded border border-slate-800/80">
-                        <div className="text-slate-500 text-[10px]">Индекс RSI:</div>
-                        <div
-                          className={`font-bold ${
-                            currentAnalysis.rsi > 70
-                              ? 'text-rose-400'
-                              : currentAnalysis.rsi < 30
-                              ? 'text-emerald-400'
-                              : 'text-slate-200'
-                          }`}
-                        >
-                          {currentAnalysis.rsi.toFixed(1)}
-                        </div>
                       </div>
                     </div>
                   ) : (
