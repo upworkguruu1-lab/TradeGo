@@ -24,6 +24,9 @@ import {
   checkBreak,
   checkPullback,
   calculateStructuralSlTp,
+  getHigherTimeframeTrend,
+  calculateParabolicAtrStop,
+  getMarketRegime,
 } from './utils/indicators';
 import {
   playChime,
@@ -50,10 +53,12 @@ const DEFAULT_SETTINGS: TerminalSettings = {
   riskPct: 1.0,
   leverage: 1, // 1x for spot (own funds)
   feeRatePct: 0.05,
-  slAtr: 1.4,
-  tpAtr: 2.4,
+  slAtr: 1.25,
+  tpAtr: 1.5,
   useDynamicSlTp: true,
   trailingStopEnabled: true,
+  useParabolicTrailing: true,
+  useHtfFilter: true,
   timeframeOptimized: '5m',
   dailyTargetPct: 5.0, // Цель сессии за 1 день: +5.0%
   maxDailyLossPct: 3.0, // Защитный Circuit Breaker дня: -3.0%
@@ -508,44 +513,46 @@ export default function App() {
         return;
       }
 
-      // Smart Break-Even Move: if price moved 50% toward TP, move SL to entry + slight buffer
-      const targetDelta = Math.abs(pos.tp - pos.entry);
-      const curMove = Math.abs(currentPrice - pos.entry);
-      if (!pos.layer2Done && curMove >= targetDelta * 0.5 && pnlGrossPct > 0.3) {
-        const breakEvenPrice = pos.dir === 'LONG' ? pos.entry * 1.0008 : pos.entry * 0.9992;
-        setPositions((prev) =>
-          prev.map((p) =>
-            p.id === pos.id ? { ...p, sl: breakEvenPrice, layer2Done: true } : p
-          )
-        );
-        addLog(`🛡️ Безубыток (5M PRO): Стоп по ${pos.symbol} переведен в +0.08%! Риск сделки = 0%`, 'info');
-      }
+      // Dynamic Parabolic ATR Trailing Stop Engine
+      const highestPrice = Math.max(pos.highestPrice ?? pos.entry, currentPrice);
+      const lowestPrice = Math.min(pos.lowestPrice ?? pos.entry, currentPrice);
+      const curAnalysis = candles.length > 15 ? analyzeMarket(candles) : null;
+      const curAtr = curAnalysis?.atr || (pos.entry * 0.0035);
 
-      // Dynamic Trailing Stop: if enabled and price has progressed > 70% towards TP, trail SL closely
-      if (settings.trailingStopEnabled && curMove >= targetDelta * 0.70) {
-        const trailBuffer = targetDelta * 0.25;
-        if (pos.dir === 'LONG') {
-          const newTrailingSl = currentPrice - trailBuffer;
-          if (newTrailingSl > pos.sl) {
-            setPositions((prev) =>
-              prev.map((p) =>
-                p.id === pos.id ? { ...p, sl: newTrailingSl, trailingActivated: true } : p
-              )
-            );
-          }
-        } else {
-          const newTrailingSl = currentPrice + trailBuffer;
-          if (newTrailingSl < pos.sl) {
-            setPositions((prev) =>
-              prev.map((p) =>
-                p.id === pos.id ? { ...p, sl: newTrailingSl, trailingActivated: true } : p
-              )
-            );
+      if (settings.useParabolicTrailing || settings.trailingStopEnabled) {
+        const trail = calculateParabolicAtrStop(
+          pos.entry,
+          currentPrice,
+          highestPrice,
+          lowestPrice,
+          pos.dir,
+          curAtr,
+          pos.sl,
+          settings.feeRatePct
+        );
+
+        if (trail.newSl !== pos.sl) {
+          setPositions((prev) =>
+            prev.map((p) =>
+              p.id === pos.id
+                ? {
+                    ...p,
+                    sl: trail.newSl,
+                    highestPrice,
+                    lowestPrice,
+                    trailingActivated: trail.trailingActivated || p.trailingActivated,
+                    layer2Done: trail.breakEvenDone || p.layer2Done,
+                  }
+                : p
+            )
+          );
+          if (trail.reason && !pos.trailingActivated) {
+            addLog(`🛡️ Защита сделки (${pos.symbol}): ${trail.reason} | Новый SL: $${trail.newSl.toFixed(2)}`, 'info');
           }
         }
       }
     });
-  }, [currentPrice, positions, handleClosePosition, settings.trailingStopEnabled, addLog]);
+  }, [currentPrice, positions, handleClosePosition, settings.trailingStopEnabled, settings.useParabolicTrailing, settings.feeRatePct, candles, addLog]);
 
   // Market Scanner Engine
   useEffect(() => {
@@ -586,32 +593,39 @@ export default function App() {
     const analysis = analyzeMarket(candles);
     const lastCandle = candles[candles.length - 1];
 
-    // 1. Фильтр по спреду и микро-волатильности (Spread Filter)
-    // Отсекаем как аномально широкий спред (проскальзывание), так и "мертвый" спред (боковик без движения)
+    // 1. Фильтр рыночного режима (Market Regime & Squeeze Protection)
+    const marketRegime = getMarketRegime(candles, analysis);
+    if (!marketRegime.isFavorable) {
+      // Блокируем входы в мертвом штиле или боковом распиле
+      return;
+    }
+
+    // Фильтр по спреду и микро-волатильности
     if (analysis.spread > mlState.params.spreadMax) return;
-    if (analysis.spread < 0.02 || (analysis.bbWidth < 0.35 && analysis.adx < 18)) {
+    if (analysis.spread < 0.015 || (analysis.bbWidth < 0.28 && analysis.adx < 18)) {
       return; // Мертвый боковик без волатильности
     }
 
     if (settings.botMode === 'safe' && analysis.adx < 22) return;
 
-    // 2. Подтверждение объёма для 5M: отсекаем ложные пробои на пустом стакане
+    // 2. Подтверждение объёма для 5M
     const isVolumeSupported = lastCandle.volume >= (analysis.volumeAvg * 1.05);
     if (!isVolumeSupported && analysis.adx < 20 && settings.botMode === 'safe') {
       return;
     }
 
-    // 3. Фильтр по направлению тренда (EMA 20/50) и отсечению боковика
-    const emaFast = analysis.ema21; // EMA 20/21
-    const emaSlow = analysis.ema50; // EMA 50
+    // 3. Мультифреймовый фильтр тренда (HTF 15M Confluence)
+    const htfTrend = getHigherTimeframeTrend(candles, 3);
+
+    // 4. Локальный фильтр по наклону EMA 20/50
+    const emaFast = analysis.ema21;
+    const emaSlow = analysis.ema50;
     const emaDistPct = (Math.abs(emaFast - emaSlow) / emaSlow) * 100;
     const isEmaUptrend = emaFast > emaSlow && lastCandle.close > emaSlow;
     const isEmaDowntrend = emaFast < emaSlow && lastCandle.close < emaSlow;
 
-    // Защита от боковика: если скользящие EMA 20 и EMA 50 сплетены (дистанция < 0.06%), рынок в распиле
-    const isSidewaysChop = emaDistPct < 0.06 && analysis.adx < 20;
-    if (isSidewaysChop) {
-      return; // Сигнал в боковике заблокирован
+    if (emaDistPct < 0.05 && analysis.adx < 19) {
+      return; // Боковой распил
     }
 
     // Check Strategy Setups
@@ -634,18 +648,20 @@ export default function App() {
       if (s) detected.push(s);
     }
 
-    // 3. Строгий фильтр направления: сделка должна строго совпадать с наклоном EMA 20/50
+    // 5. Двойной фильтр тренда: совпадение 5M EMA и 15M HTF
     const trendFiltered = detected.filter((s) => {
       if (s.dir === 'LONG') {
-        return isEmaUptrend;
+        const isHtfOk = htfTrend.dir === 'UP' || (htfTrend.dir === 'NEUTRAL' && analysis.adx >= 20);
+        return isEmaUptrend && isHtfOk;
       }
       if (s.dir === 'SHORT') {
-        return isEmaDowntrend;
+        const isHtfOk = htfTrend.dir === 'DOWN' || (htfTrend.dir === 'NEUTRAL' && analysis.adx >= 20);
+        return isEmaDowntrend && isHtfOk;
       }
       return false;
     });
 
-    // Spot Mode Filter: on Spot you cannot short; ONLY LONG dip-buys and breakouts are allowed!
+    // Spot Mode Filter: only LONG dip-buys and breakouts
     const validDetected = settings.marketType === 'spot'
       ? trendFiltered.filter((s) => s.dir === 'LONG')
       : trendFiltered;
@@ -655,14 +671,16 @@ export default function App() {
     // Pick top weighted strategy
     const chosen = validDetected[0];
     const entry = lastCandle.close;
-    const atrVal = analysis.atr || (lastCandle.close * 0.005);
+    const atrVal = analysis.atr || (lastCandle.close * 0.0035);
     const { sl, tp, rrRatio } = calculateStructuralSlTp(
       candles,
       entry,
       chosen.dir,
       atrVal,
       settings.slAtr,
-      settings.tpAtr
+      settings.tpAtr,
+      settings.timeframe,
+      settings.symbol
     );
 
     const newSignal: TradeSignal = {
@@ -751,6 +769,10 @@ export default function App() {
       maxProfitPct: 0,
       layer1Done: false,
       layer2Done: false,
+      highestPrice: sig.entry,
+      lowestPrice: sig.entry,
+      breakEvenDone: false,
+      trailingActivated: false,
     };
 
     setPositions((prev) => [newPosition, ...prev]);
@@ -816,6 +838,8 @@ export default function App() {
                 <DailySessionCard
                   sessionStats={sessionStats}
                   settings={settings}
+                  marketRegime={currentAnalysis ? getMarketRegime(candles, currentAnalysis) : null}
+                  htfTrend={candles.length > 25 ? getHigherTimeframeTrend(candles, 3) : null}
                   onResetSession={handleResetSession}
                   onOpenSettings={() => setIsSettingsOpen(true)}
                 />

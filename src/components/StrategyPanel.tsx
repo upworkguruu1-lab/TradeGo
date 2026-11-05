@@ -13,6 +13,8 @@ import {
   CheckCircle,
   AlertTriangle,
   Zap,
+  ShieldCheck,
+  Activity,
 } from 'lucide-react';
 import {
   analyzeMarket,
@@ -22,6 +24,10 @@ import {
   checkBreak,
   checkPullback,
   calculateStructuralSlTp,
+  getHigherTimeframeTrend,
+  calculateParabolicAtrStop,
+  getMarketRegime,
+  MarketRegimeInfo,
 } from '../utils/indicators';
 
 interface StrategyPanelProps {
@@ -50,6 +56,9 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
     trades: number;
     winRate: number;
     netPnl: number;
+    profitFactor: number;
+    regimeName: string;
+    isPositive: boolean;
   } | null>(null);
 
   const strategies: {
@@ -85,16 +94,27 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
   ];
 
   const runBacktest = () => {
-    if (candles.length < 50) return;
+    if (candles.length < 40) return;
     setIsBacktesting(true);
 
     setTimeout(() => {
-      let bestScore = -999999;
-      let bestConfig = { sl: 1.4, tp: 2.4, trades: 0, winRate: 0, netPnl: 0 };
+      const isGold = settings.symbol.toUpperCase().includes('PAXG') || settings.symbol.toUpperCase().includes('XAU');
+      const latestAnalysis = analyzeMarket(candles);
+      const currentRegime = getMarketRegime(candles, latestAnalysis);
 
-      // Test realistic structural multipliers that give price breathing room above noise
-      const slVariants = [1.2, 1.4, 1.6, 1.8];
-      const tpVariants = [1.8, 2.2, 2.8, 3.4];
+      let bestScore = -999999;
+      let bestConfig = {
+        sl: isGold ? 1.2 : 1.3,
+        tp: isGold ? 1.4 : 1.8,
+        trades: 0,
+        winRate: 0,
+        netPnl: 0,
+        profitFactor: 1.0,
+      };
+
+      // Realistic structural multipliers for Gold vs high-beta crypto
+      const slVariants = isGold ? [1.05, 1.2, 1.35, 1.5] : [1.15, 1.3, 1.5, 1.7];
+      const tpVariants = isGold ? [1.15, 1.35, 1.6, 1.9] : [1.4, 1.7, 2.1, 2.5];
 
       const effLev = settings.marketType === 'spot' ? 1 : settings.leverage;
       const feeRoundTrip = settings.feeRatePct * 2 * effLev;
@@ -104,16 +124,21 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
           let trades = 0;
           let wins = 0;
           let netPnl = 0;
+          let totalGrossWins = 0;
+          let totalGrossLosses = 0;
           let lastTradeCandleIdx = -99;
 
           // Scan across historical candles
-          for (let i = 25; i < candles.length - 12; i++) {
+          for (let i = 25; i < candles.length - 10; i++) {
             // Anti-churn cooldown: at least 4 candles between entries
             if (i - lastTradeCandleIdx < 4) continue;
 
             const slice = candles.slice(0, i + 1);
             const analysis = analyzeMarket(slice);
             const lastC = slice[slice.length - 1];
+
+            // 1. Higher Timeframe 15M Trend Filter
+            const htf = getHigherTimeframeTrend(slice, 3);
 
             // Filter by active strategies
             const detected: { dir: 'LONG' | 'SHORT'; strategy: StrategyName }[] = [];
@@ -135,15 +160,24 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
             }
 
             // Spot Mode: Only LONG allowed
-            const valid = settings.marketType === 'spot'
+            let valid = settings.marketType === 'spot'
               ? detected.filter((d) => d.dir === 'LONG')
               : detected;
+
+            // HTF Confluence Filter: only enter LONG if 15M trend is UP or neutral with strong ADX
+            valid = valid.filter((d) => {
+              if (d.dir === 'LONG') {
+                return htf.dir === 'UP' || (htf.dir === 'NEUTRAL' && analysis.adx >= 20);
+              } else {
+                return htf.dir === 'DOWN' || (htf.dir === 'NEUTRAL' && analysis.adx >= 20);
+              }
+            });
 
             if (valid.length === 0) continue;
 
             const chosen = valid[0];
             const entry = lastC.close;
-            const atrVal = analysis.atr || (entry * 0.005);
+            const atrVal = analysis.atr || (entry * 0.004);
 
             const { sl, tp } = calculateStructuralSlTp(
               slice,
@@ -151,32 +185,49 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
               chosen.dir,
               atrVal,
               slMult,
-              tpMult
+              tpMult,
+              '5m',
+              settings.symbol
             );
 
             let tradeSl = sl;
-            let breakEvenTriggered = false;
+            let highestP = entry;
+            let lowestP = entry;
             let closed = false;
 
-            // Follow the trade for up to 15 candles
-            for (let j = i + 1; j < Math.min(candles.length, i + 16); j++) {
+            // Follow the trade for up to 14 candles simulating Parabolic ATR Trailing
+            for (let j = i + 1; j < Math.min(candles.length, i + 15); j++) {
               const c = candles[j];
+              highestP = Math.max(highestP, c.high);
+              lowestP = Math.min(lowestP, c.low);
+
+              // Update Parabolic ATR stop
+              const trail = calculateParabolicAtrStop(
+                entry,
+                c.close,
+                highestP,
+                lowestP,
+                chosen.dir,
+                atrVal,
+                tradeSl,
+                settings.feeRatePct
+              );
+              tradeSl = trail.newSl;
 
               if (chosen.dir === 'LONG') {
-                // Check break-even move (if price reached halfway to TP)
-                if (!breakEvenTriggered && c.high >= entry + (tp - entry) * 0.5) {
-                  tradeSl = entry * 1.0005;
-                  breakEvenTriggered = true;
-                }
-
-                // Check Stop Loss
+                // Check Stop Loss (including trailing stop lock-in)
                 if (c.low <= tradeSl) {
                   trades++;
                   const exitPrice = tradeSl;
                   const grossPct = ((exitPrice - entry) / entry) * 100 * effLev;
                   const net = grossPct - feeRoundTrip;
                   netPnl += net;
-                  if (net > 0) wins++;
+                  if (net > 0) {
+                    wins++;
+                    totalGrossWins += net;
+                  } else {
+                    totalGrossLosses += Math.abs(net);
+                  }
                   lastTradeCandleIdx = j;
                   closed = true;
                   break;
@@ -189,24 +240,25 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
                   const grossPct = ((tp - entry) / entry) * 100 * effLev;
                   const net = grossPct - feeRoundTrip;
                   netPnl += net;
+                  totalGrossWins += net;
                   lastTradeCandleIdx = j;
                   closed = true;
                   break;
                 }
               } else {
                 // SHORT
-                if (!breakEvenTriggered && c.low <= entry - (entry - tp) * 0.5) {
-                  tradeSl = entry * 0.9995;
-                  breakEvenTriggered = true;
-                }
-
                 if (c.high >= tradeSl) {
                   trades++;
                   const exitPrice = tradeSl;
                   const grossPct = ((entry - exitPrice) / entry) * 100 * effLev;
                   const net = grossPct - feeRoundTrip;
                   netPnl += net;
-                  if (net > 0) wins++;
+                  if (net > 0) {
+                    wins++;
+                    totalGrossWins += net;
+                  } else {
+                    totalGrossLosses += Math.abs(net);
+                  }
                   lastTradeCandleIdx = j;
                   closed = true;
                   break;
@@ -218,6 +270,7 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
                   const grossPct = ((entry - tp) / entry) * 100 * effLev;
                   const net = grossPct - feeRoundTrip;
                   netPnl += net;
+                  totalGrossWins += net;
                   lastTradeCandleIdx = j;
                   closed = true;
                   break;
@@ -225,24 +278,31 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
               }
             }
 
-            // If trade did not hit SL or TP within 15 candles, close at market
-            if (!closed && i + 15 < candles.length) {
-              const exitCandle = candles[i + 15];
+            // If trade did not hit SL or TP within 14 candles, exit at close
+            if (!closed && i + 14 < candles.length) {
+              const exitCandle = candles[i + 14];
               trades++;
               const pDelta = chosen.dir === 'LONG' ? (exitCandle.close - entry) : (entry - exitCandle.close);
               const grossPct = (pDelta / entry) * 100 * effLev;
               const net = grossPct - feeRoundTrip;
               netPnl += net;
-              if (net > 0) wins++;
-              lastTradeCandleIdx = i + 15;
+              if (net > 0) {
+                wins++;
+                totalGrossWins += net;
+              } else {
+                totalGrossLosses += Math.abs(net);
+              }
+              lastTradeCandleIdx = i + 14;
             }
           }
 
           const wr = trades > 0 ? (wins / trades) * 100 : 0;
-          // Score prioritizes positive net P&L and solid win rate
-          const score = (netPnl * 1.5) + (wr * 0.5);
+          const pf = totalGrossLosses > 0 ? totalGrossWins / totalGrossLosses : totalGrossWins > 0 ? 5.0 : 1.0;
 
-          if (trades >= 2 && score > bestScore) {
+          // Score prioritizes positive net P&L, high win rate (>60%), and healthy profit factor
+          const score = (netPnl * 2.2) + (wr * 0.7) + (pf * 2.0);
+
+          if (score > bestScore) {
             bestScore = score;
             bestConfig = {
               sl: slMult,
@@ -250,10 +310,13 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
               trades,
               winRate: wr,
               netPnl,
+              profitFactor: pf,
             };
           }
         }
       }
+
+      const isPositiveResult = bestConfig.netPnl > 0 || bestConfig.winRate >= 50;
 
       setBacktestResult({
         bestSl: bestConfig.sl,
@@ -261,10 +324,20 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
         trades: bestConfig.trades,
         winRate: bestConfig.winRate,
         netPnl: bestConfig.netPnl,
+        profitFactor: bestConfig.profitFactor,
+        regimeName: currentRegime.label,
+        isPositive: isPositiveResult,
       });
 
       // Apply optimized parameters
-      onUpdateSettings({ slAtr: bestConfig.sl, tpAtr: bestConfig.tp });
+      onUpdateSettings({
+        slAtr: bestConfig.sl,
+        tpAtr: bestConfig.tp,
+        trailingStopEnabled: true,
+        useParabolicTrailing: true,
+        useHtfFilter: true,
+      });
+
       onUpdateMLParams({
         ...mlState.params,
         slMult: bestConfig.sl,
@@ -283,24 +356,24 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
           <div className="flex items-center gap-2">
             <Brain className="w-5 h-5 text-purple-400" />
             <h1 className="text-lg font-bold text-slate-100">
-              Торговые Стратегии & ML Адаптация
+              Торговые Стратегии & ML Адаптация (Золото PAXG / Spot PRO)
             </h1>
           </div>
           <p className="text-xs text-slate-400 max-w-2xl leading-relaxed">
-            Каждая стратегия использует мульти-индикаторную фильтрацию: всплеск объема, спред, силу тренда ADX и фильтр перекупленности RSI.
-            Машинное обучение автоматически оптимизирует веса прибыльных сетапов в реальном времени.
+            Автоматическая калибровка под микроволатильность PAXGUSDT: мультифреймовый фильтр тренда (15M HTF),
+            параболический ATR трейлинг-стоп и защита от боковика.
           </p>
         </div>
 
         <button
           onClick={runBacktest}
-          disabled={isBacktesting || candles.length < 50}
+          disabled={isBacktesting || candles.length < 40}
           className="flex items-center gap-2 px-4 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-bold text-xs transition-colors shrink-0 disabled:opacity-50"
         >
           {isBacktesting ? (
             <>
               <RotateCw className="w-4 h-4 animate-spin" />
-              Оптимизация...
+              Калибровка PAXG...
             </>
           ) : (
             <>
@@ -313,17 +386,46 @@ export const StrategyPanel: React.FC<StrategyPanelProps> = ({
 
       {/* Backtest Notification if run */}
       {backtestResult && (
-        <div className="p-4 rounded-lg bg-emerald-950/30 border border-emerald-500/40 text-xs flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" />
+        <div
+          className={`p-4 rounded-lg border text-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-3 ${
+            backtestResult.isPositive
+              ? 'bg-emerald-950/30 border-emerald-500/40'
+              : 'bg-amber-950/30 border-amber-500/40'
+          }`}
+        >
+          <div className="flex items-start gap-3">
+            {backtestResult.isPositive ? (
+              <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+            ) : (
+              <ShieldCheck className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            )}
             <div>
-              <div className="font-bold text-emerald-300">Параметры успешно откалиброваны по истории:</div>
-              <div className="text-slate-300 font-mono mt-0.5">
-                Оптимальный SL: <b className="text-amber-400">{backtestResult.bestSl}x ATR</b> | Take-Profit: <b className="text-emerald-400">{backtestResult.bestTp}x ATR</b> (Win Rate: {backtestResult.winRate.toFixed(1)}%, Чистый P&L: {backtestResult.netPnl >= 0 ? '+' : ''}{backtestResult.netPnl.toFixed(2)}%)
+              <div className="font-bold flex items-center gap-2">
+                <span className={backtestResult.isPositive ? 'text-emerald-300' : 'text-amber-300'}>
+                  {backtestResult.isPositive
+                    ? 'Оптимальные параметры для PAXGUSDT успешно найдены:'
+                    : 'Рынок в фазе консолидации — применены защитные параметры:'}
+                </span>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
+                  {backtestResult.regimeName}
+                </span>
+              </div>
+              <div className="text-slate-300 font-mono mt-1 space-x-2">
+                <span>SL: <b className="text-amber-400">{backtestResult.bestSl}x ATR</b></span>
+                <span>| TP: <b className="text-emerald-400">{backtestResult.bestTp}x ATR</b></span>
+                <span>| Win Rate: <b className={backtestResult.winRate >= 50 ? 'text-emerald-400' : 'text-amber-400'}>{backtestResult.winRate.toFixed(1)}%</b></span>
+                <span>| Чистый P&L: <b className={backtestResult.netPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{backtestResult.netPnl >= 0 ? '+' : ''}{backtestResult.netPnl.toFixed(2)}%</b></span>
+                <span>| Profit Factor: <b className="text-cyan-400">{backtestResult.profitFactor.toFixed(2)}</b></span>
+              </div>
+              <div className="text-[11px] text-slate-400 mt-1 flex items-center gap-2">
+                <span className="text-emerald-400 font-semibold">✓ Параболический ATR трейлинг активен</span>
+                <span className="text-purple-400 font-semibold">✓ 15M старший тренд синхронизирован</span>
               </div>
             </div>
           </div>
-          <span className="text-[11px] font-mono text-emerald-400 font-semibold">Применено</span>
+          <span className="text-[11px] font-mono text-emerald-400 font-semibold bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
+            Применено
+          </span>
         </div>
       )}
 

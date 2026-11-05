@@ -66,6 +66,9 @@ export interface UserPosition {
   layer1Done: boolean;
   layer2Done: boolean;   // Break-even moved
   highestPrice?: number;
+  lowestPrice?: number;
+  trailingStep?: number;
+  breakEvenDone?: boolean;
   trailingActivated?: boolean;
 }
 
@@ -115,6 +118,8 @@ export interface TerminalSettings {
   tpAtr: number;
   useDynamicSlTp: boolean;       // Dynamic swing-based SL & volatility-based TP
   trailingStopEnabled: boolean;  // Trailing stop lock-in as price advances
+  useParabolicTrailing?: boolean; // Parabolic ATR trailing with acceleration factor
+  useHtfFilter?: boolean;        // Multi-timeframe trend confluence filter (15M / 1H)
   timeframeOptimized: '5m' | 'auto'; // Specialized 5M candle optimization
   dailyTargetPct: number;        // Цель дневной сессии в % (например, +5%)
   maxDailyLossPct: number;       // Максимальная дневная просадка в % (например, -3%)

@@ -275,6 +275,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             <label className="flex items-center justify-between cursor-pointer">
               <div>
+                <div className="text-slate-200 font-medium">Параболический ATR Трейлинг-Стоп</div>
+                <div className="text-[10px] text-slate-500">Авто-безубыток при +0.25% и ступенчатое подтягивание стопа с ускорением</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={settings.useParabolicTrailing ?? true}
+                onChange={(e) => onSave({ useParabolicTrailing: e.target.checked, trailingStopEnabled: e.target.checked })}
+                className="rounded border-slate-700 bg-slate-800 text-amber-500"
+              />
+            </label>
+
+            <label className="flex items-center justify-between cursor-pointer">
+              <div>
+                <div className="text-slate-200 font-medium">Синхронизация тренда 15M (HTF Filter)</div>
+                <div className="text-[10px] text-slate-500">Запрещает входы против тренда старшего таймфрейма и в боковике</div>
+              </div>
+              <input
+                type="checkbox"
+                checked={settings.useHtfFilter ?? true}
+                onChange={(e) => onSave({ useHtfFilter: e.target.checked })}
+                className="rounded border-slate-700 bg-slate-800 text-amber-500"
+              />
+            </label>
+
+            <label className="flex items-center justify-between cursor-pointer">
+              <div>
                 <div className="text-slate-200 font-medium">Моно-фокус: Только активная пара</div>
                 <div className="text-[10px] text-slate-500">Бот торгует строго выбранную пару {settings.symbol}, не распыляя депозит</div>
               </div>

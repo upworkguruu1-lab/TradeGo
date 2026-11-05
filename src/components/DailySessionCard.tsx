@@ -1,10 +1,13 @@
 import React from 'react';
 import { SessionStats, TerminalSettings } from '../types/trading';
-import { Target, Shield, CheckCircle2, AlertTriangle, RotateCcw, TrendingUp, Sliders } from 'lucide-react';
+import { Target, Shield, CheckCircle2, AlertTriangle, RotateCcw, TrendingUp, Sliders, Activity, ShieldCheck } from 'lucide-react';
+import { MarketRegimeInfo, HtfTrendAnalysis } from '../utils/indicators';
 
 interface DailySessionCardProps {
   sessionStats: SessionStats;
   settings: TerminalSettings;
+  marketRegime?: MarketRegimeInfo | null;
+  htfTrend?: HtfTrendAnalysis | null;
   onResetSession: () => void;
   onOpenSettings: () => void;
 }
@@ -12,6 +15,8 @@ interface DailySessionCardProps {
 export const DailySessionCard: React.FC<DailySessionCardProps> = ({
   sessionStats,
   settings,
+  marketRegime,
+  htfTrend,
   onResetSession,
   onOpenSettings,
 }) => {
@@ -173,6 +178,53 @@ export const DailySessionCard: React.FC<DailySessionCardProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Market Regime & HTF Trend Ribbon */}
+      {(marketRegime || htfTrend) && (
+        <div className="mt-2.5 pt-2 border-t border-slate-800/60 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 flex items-center gap-1 font-medium">
+              <Activity className="w-3.5 h-3.5 text-cyan-400" />
+              Рыночный режим:
+            </span>
+            {marketRegime ? (
+              <span
+                className={`px-2 py-0.5 rounded-full border font-mono font-semibold ${marketRegime.badgeColor}`}
+                title={marketRegime.reason}
+              >
+                {marketRegime.label}
+              </span>
+            ) : (
+              <span className="text-slate-500 font-mono">Анализ свечей...</span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-slate-400 font-medium">15M Тренд:</span>
+            {htfTrend ? (
+              <span
+                className={`px-2 py-0.5 rounded-full border font-mono font-semibold ${
+                  htfTrend.dir === 'UP'
+                    ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30'
+                    : htfTrend.dir === 'DOWN'
+                    ? 'text-rose-400 bg-rose-500/10 border-rose-500/30'
+                    : 'text-slate-400 bg-slate-800 border-slate-700'
+                }`}
+                title={htfTrend.desc}
+              >
+                {htfTrend.dir === 'UP' ? 'Восходящий ↗' : htfTrend.dir === 'DOWN' ? 'Нисходящий ↘' : 'Боковик ➔'}
+              </span>
+            ) : (
+              <span className="text-slate-500 font-mono">Загрузка...</span>
+            )}
+
+            <div className="hidden lg:flex items-center gap-1 text-slate-400 ml-2">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="text-[10px] text-emerald-400 font-mono">Параболик ATR Трейлинг</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Advisory Banner when target reached or locked */}
       {isTargetReached && settings.autoStopOnTarget && (

@@ -452,34 +452,39 @@ export function checkPullback(
   return null;
 }
 
-// Calculate structural Stop Loss and Take Profit with dynamic 5M swing & volatility adaptation
+// Calculate structural Stop Loss and Take Profit with dynamic 5M swing & volatility adaptation (tailored for PAXG & Crypto)
 export function calculateStructuralSlTp(
   candles: Candle[],
   entry: number,
   dir: Direction,
   atrVal: number,
-  slMult = 1.4,
-  tpMult = 2.4,
-  timeframe = '5m'
+  slMult = 1.3,
+  tpMult = 1.6,
+  timeframe = '5m',
+  symbol = 'PAXGUSDT'
 ): { sl: number; tp: number; rrRatio: number; targetGainPct: number } {
-  // On 5m, the ideal lookback for local swing pivots is 8 to 12 candles (40-60 min)
+  // On 5m, lookback for local swing pivots is 8 to 12 candles
   const lookback = timeframe === '5m' ? 10 : 8;
   const recentBars = candles.slice(-lookback);
 
-  // Dynamic noise floor based on 5m ATR: minimum 1.3x ATR to never get stopped by normal wicks
-  const minSlDist = atrVal * Math.max(1.3, slMult);
-  const maxSlDist = atrVal * 2.5;
+  // Is this a precious metal / low % volatility asset?
+  const isGold = symbol.toUpperCase().includes('PAXG') || symbol.toUpperCase().includes('XAU');
+
+  // Realistic noise floor: for gold 1.1x - 1.4x ATR is standard breathing room
+  const minSlDist = atrVal * Math.max(isGold ? 1.05 : 1.2, slMult);
+  const maxSlDist = atrVal * (isGold ? 1.8 : 2.5);
 
   if (dir === 'LONG') {
     // Find dynamic swing low
     const swingLow = Math.min(...recentBars.map((c) => c.low));
-    // Buffer below swing low
-    let slDist = entry - swingLow + atrVal * 0.25;
+    let slDist = entry - swingLow + atrVal * (isGold ? 0.15 : 0.25);
     slDist = Math.max(minSlDist, Math.min(maxSlDist, slDist));
 
     const sl = entry - slDist;
-    // Dynamic Take Profit: target at least 1.8x to 2.4x the distance of the stop
-    const targetRr = Math.max(1.8, tpMult / Math.max(1, slMult));
+    // Dynamic Take Profit: for gold, target 1.2x to 1.8x ATR so profits are realistically achieved
+    const targetRr = isGold
+      ? Math.max(1.1, tpMult / Math.max(1, slMult * 0.9))
+      : Math.max(1.4, tpMult / Math.max(1, slMult));
     const tp = entry + slDist * targetRr;
     const rrRatio = (tp - entry) / slDist;
     const targetGainPct = ((tp - entry) / entry) * 100;
@@ -488,11 +493,13 @@ export function calculateStructuralSlTp(
   } else {
     // Find dynamic swing high
     const swingHigh = Math.max(...recentBars.map((c) => c.high));
-    let slDist = swingHigh - entry + atrVal * 0.25;
+    let slDist = swingHigh - entry + atrVal * (isGold ? 0.15 : 0.25);
     slDist = Math.max(minSlDist, Math.min(maxSlDist, slDist));
 
     const sl = entry + slDist;
-    const targetRr = Math.max(1.8, tpMult / Math.max(1, slMult));
+    const targetRr = isGold
+      ? Math.max(1.1, tpMult / Math.max(1, slMult * 0.9))
+      : Math.max(1.4, tpMult / Math.max(1, slMult));
     const tp = entry - slDist * targetRr;
     const rrRatio = (entry - tp) / slDist;
     const targetGainPct = ((entry - tp) / entry) * 100;
@@ -500,4 +507,288 @@ export function calculateStructuralSlTp(
     return { sl, tp, rrRatio, targetGainPct };
   }
 }
+
+// Resample 5m candles into 15m (factor 3) or 1h (factor 12)
+export function resampleCandles(candles: Candle[], factor = 3): Candle[] {
+  if (candles.length === 0) return [];
+  const resampled: Candle[] = [];
+  for (let i = 0; i < candles.length; i += factor) {
+    const chunk = candles.slice(i, i + factor);
+    if (chunk.length === 0) continue;
+    const open = chunk[0].open;
+    const close = chunk[chunk.length - 1].close;
+    const high = Math.max(...chunk.map((c) => c.high));
+    const low = Math.min(...chunk.map((c) => c.low));
+    const volume = chunk.reduce((acc, c) => acc + c.volume, 0);
+    const quoteVolume = chunk.reduce((acc, c) => acc + (c.quoteVolume || 0), 0);
+    resampled.push({
+      t: chunk[0].t,
+      open,
+      high,
+      low,
+      close,
+      volume,
+      quoteVolume,
+      closed: chunk.length === factor,
+    });
+  }
+  return resampled;
+}
+
+export interface HtfTrendAnalysis {
+  dir: 'UP' | 'DOWN' | 'NEUTRAL';
+  emaFast: number;
+  emaSlow: number;
+  adx: number;
+  isBullish: boolean;
+  isBearish: boolean;
+  isNeutral: boolean;
+  desc: string;
+}
+
+// Calculate Higher Timeframe (15M / 1H) Trend Confluence
+export function getHigherTimeframeTrend(candles: Candle[], factor = 3): HtfTrendAnalysis {
+  if (candles.length < 25) {
+    return {
+      dir: 'NEUTRAL',
+      emaFast: 0,
+      emaSlow: 0,
+      adx: 0,
+      isBullish: false,
+      isBearish: false,
+      isNeutral: true,
+      desc: 'Накопление данных (менее 25 свечей)',
+    };
+  }
+
+  const htfCandles = resampleCandles(candles, factor);
+  const lastPrice = candles[candles.length - 1].close;
+
+  // If resampled bars are few, use higher periods on 5M (EMA 60 and EMA 150)
+  if (htfCandles.length < 16) {
+    const eFast = ema(candles, 60);
+    const eSlow = ema(candles, 150);
+    const ef = eFast[eFast.length - 1] ?? lastPrice;
+    const es = eSlow[eSlow.length - 1] ?? lastPrice;
+    const distPct = ((ef - es) / es) * 100;
+
+    if (distPct > 0.04 && lastPrice > ef) {
+      return {
+        dir: 'UP',
+        emaFast: ef,
+        emaSlow: es,
+        adx: 24,
+        isBullish: true,
+        isBearish: false,
+        isNeutral: false,
+        desc: '15M Старший тренд ВОСХОДЯЩИЙ (EMA-60 > EMA-150)',
+      };
+    } else if (distPct < -0.04 && lastPrice < ef) {
+      return {
+        dir: 'DOWN',
+        emaFast: ef,
+        emaSlow: es,
+        adx: 24,
+        isBullish: false,
+        isBearish: true,
+        isNeutral: false,
+        desc: '15M Старший тренд НИСХОДЯЩИЙ (EMA-60 < EMA-150)',
+      };
+    }
+    return {
+      dir: 'NEUTRAL',
+      emaFast: ef,
+      emaSlow: es,
+      adx: 14,
+      isBullish: false,
+      isBearish: false,
+      isNeutral: true,
+      desc: '15M Старший тренд НЕЙТРАЛЬНЫЙ (Боковик)',
+    };
+  }
+
+  const eFast = ema(htfCandles, 20);
+  const eSlow = ema(htfCandles, 50);
+  const adxVals = adx(htfCandles, 14);
+  const lastBar = htfCandles[htfCandles.length - 1];
+  const ef = eFast[eFast.length - 1] ?? lastBar.close;
+  const es = eSlow[eSlow.length - 1] ?? lastBar.close;
+  const htfAdx = adxVals[adxVals.length - 1] ?? 18;
+
+  const distPct = ((ef - es) / es) * 100;
+  if (ef > es && lastPrice >= es * 0.999 && (distPct > 0.03 || htfAdx >= 18)) {
+    return {
+      dir: 'UP',
+      emaFast: ef,
+      emaSlow: es,
+      adx: htfAdx,
+      isBullish: true,
+      isBearish: false,
+      isNeutral: false,
+      desc: `15M Тренд ВОСХОДЯЩИЙ (ADX ${htfAdx.toFixed(0)}, EMA20 > EMA50)`,
+    };
+  } else if (ef < es && lastPrice <= es * 1.001 && (distPct < -0.03 || htfAdx >= 18)) {
+    return {
+      dir: 'DOWN',
+      emaFast: ef,
+      emaSlow: es,
+      adx: htfAdx,
+      isBullish: false,
+      isBearish: true,
+      isNeutral: false,
+      desc: `15M Тренд НИСХОДЯЩИЙ (ADX ${htfAdx.toFixed(0)}, EMA20 < EMA50)`,
+    };
+  }
+
+  return {
+    dir: 'NEUTRAL',
+    emaFast: ef,
+    emaSlow: es,
+    adx: htfAdx,
+    isBullish: false,
+    isBearish: false,
+    isNeutral: true,
+    desc: '15M Тренд НЕЙТРАЛЬНЫЙ (Боковой распил)',
+  };
+}
+
+// Parabolic ATR Trailing Stop calculation
+export function calculateParabolicAtrStop(
+  entry: number,
+  currentPrice: number,
+  highestPrice: number,
+  lowestPrice: number,
+  dir: Direction,
+  atrVal: number,
+  currentSl: number,
+  feeRatePct = 0.05
+): { newSl: number; trailingActivated: boolean; breakEvenDone: boolean; reason: string } {
+  const isLong = dir === 'LONG';
+  const minProfitCover = feeRatePct * 2.2; // покрыть двойную комиссию с запасом (+0.11%)
+
+  if (isLong) {
+    const gainPct = ((currentPrice - entry) / entry) * 100;
+    const peakGainPct = ((highestPrice - entry) / entry) * 100;
+
+    let targetSl = currentSl;
+    let breakEvenDone = false;
+    let trailingActivated = false;
+    let reason = '';
+
+    // Step 1: Early Break-Even upon reaching +0.25% profit
+    if (gainPct >= 0.25 && targetSl < entry * (1 + minProfitCover / 100)) {
+      targetSl = entry * (1 + minProfitCover / 100);
+      breakEvenDone = true;
+      reason = 'Безубыток перенесен (+0.11% с учетом комиссии)';
+    }
+
+    // Step 2: Parabolic ATR trailing once price moves >= +0.40%
+    if (peakGainPct >= 0.40) {
+      trailingActivated = true;
+      // Acceleration: starts at 1.3x ATR and tightens to 0.75x ATR as profit grows
+      const af = Math.max(0.75, 1.3 - Math.min(0.55, (peakGainPct - 0.40) * 0.4));
+      const parabolicStop = highestPrice - atrVal * af;
+      if (parabolicStop > targetSl) {
+        targetSl = parabolicStop;
+        reason = `Параболик ATR трейлинг (${af.toFixed(2)}x ATR)`;
+      }
+    }
+
+    return {
+      newSl: Math.max(currentSl, targetSl),
+      trailingActivated,
+      breakEvenDone,
+      reason,
+    };
+  } else {
+    // SHORT logic
+    const gainPct = ((entry - currentPrice) / entry) * 100;
+    const peakGainPct = ((entry - lowestPrice) / entry) * 100;
+
+    let targetSl = currentSl;
+    let breakEvenDone = false;
+    let trailingActivated = false;
+    let reason = '';
+
+    if (gainPct >= 0.25 && targetSl > entry * (1 - minProfitCover / 100)) {
+      targetSl = entry * (1 - minProfitCover / 100);
+      breakEvenDone = true;
+      reason = 'Безубыток перенесен (-0.11% с учетом комиссии)';
+    }
+
+    if (peakGainPct >= 0.40) {
+      trailingActivated = true;
+      const af = Math.max(0.75, 1.3 - Math.min(0.55, (peakGainPct - 0.40) * 0.4));
+      const parabolicStop = lowestPrice + atrVal * af;
+      if (parabolicStop < targetSl) {
+        targetSl = parabolicStop;
+        reason = `Параболик ATR трейлинг (${af.toFixed(2)}x ATR)`;
+      }
+    }
+
+    return {
+      newSl: Math.min(currentSl, targetSl),
+      trailingActivated,
+      breakEvenDone,
+      reason,
+    };
+  }
+}
+
+export interface MarketRegimeInfo {
+  regime: 'TREND_STRONG' | 'TREND_MODERATE' | 'CHOP_SIDEWAYS' | 'SQUEEZE_FLAT';
+  isFavorable: boolean;
+  label: string;
+  badgeColor: string;
+  reason: string;
+}
+
+// Market Regime & Volatility Squeeze Classifier
+export function getMarketRegime(candles: Candle[], analysis: MarketAnalysis): MarketRegimeInfo {
+  const emaFast = analysis.ema21;
+  const emaSlow = analysis.ema50;
+  const emaDistPct = (Math.abs(emaFast - emaSlow) / emaSlow) * 100;
+
+  // Squeeze or dead flat
+  if (analysis.bbWidth < 0.26 || analysis.adx < 15) {
+    return {
+      regime: 'SQUEEZE_FLAT',
+      isFavorable: false,
+      label: 'Сжатие / Штиль',
+      badgeColor: 'text-amber-400 bg-amber-500/10 border-amber-500/30',
+      reason: 'Волатильность экстремально низкая (ADX < 15). Торги заблокированы от ложных выносов.',
+    };
+  }
+
+  // Sideways chop: EMAs tangled, ADX < 19
+  if (emaDistPct < 0.05 && analysis.adx < 19) {
+    return {
+      regime: 'CHOP_SIDEWAYS',
+      isFavorable: false,
+      label: 'Боковой распил',
+      badgeColor: 'text-rose-400 bg-rose-500/10 border-rose-500/30',
+      reason: 'Скользящие EMA сплетены, направленного тренда нет. Вход в сделки запрещен.',
+    };
+  }
+
+  // Strong trend
+  if (analysis.adx >= 24 && emaDistPct >= 0.07) {
+    return {
+      regime: 'TREND_STRONG',
+      isFavorable: true,
+      label: 'Сильный тренд',
+      badgeColor: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+      reason: `Благоприятная фаза для скальпинга (ADX ${analysis.adx.toFixed(0)}, тренд EMA ${emaDistPct.toFixed(2)}%).`,
+    };
+  }
+
+  return {
+    regime: 'TREND_MODERATE',
+    isFavorable: true,
+    label: 'Умеренный тренд',
+    badgeColor: 'text-cyan-400 bg-cyan-500/10 border-cyan-500/30',
+    reason: 'Допустимый тренд с достаточным объемом. Входы разрешены с параболическим трейлингом.',
+  };
+}
+
 
