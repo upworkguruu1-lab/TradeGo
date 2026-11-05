@@ -70,6 +70,9 @@ export const INTERVAL_MS: Record<Timeframe, number> = {
 // Try public Binance endpoints
 const API_ENDPOINTS = [
   'https://api.binance.com/api/v3',
+  'https://api1.binance.com/api/v3',
+  'https://api2.binance.com/api/v3',
+  'https://api3.binance.com/api/v3',
   'https://data-api.binance.vision/api/v3',
 ];
 
@@ -150,12 +153,25 @@ function generateSyntheticHistory(
   return candles;
 }
 
+const WS_SERVERS = [
+  // 1. Standard HTTPS port 443 (avoids port 9443 firewall & ISP block)
+  (stream: string) => `wss://stream.binance.com/ws/${stream}`,
+  // 2. Binance Vision public data cluster (port 443, reliable alternative)
+  (stream: string) => `wss://data-stream.binance.vision/ws/${stream}`,
+  // 3. Port 9443 legacy endpoint
+  (stream: string) => `wss://stream.binance.com:9443/ws/${stream}`,
+];
+
 export class MarketStreamManager {
   private ws: WebSocket | null = null;
   private isDestroyed = false;
+  private wsServerIndex = 0;
+  private restPollInterval: number | null = null;
+  private wsRetryTimeout: number | null = null;
   private mockInterval: number | null = null;
   private lastPrice = 0;
   private currentCandle: Candle | null = null;
+  private consecutiveRestErrors = 0;
 
   constructor(
     private symbol: string,
@@ -175,11 +191,29 @@ export class MarketStreamManager {
 
   public start() {
     this.isDestroyed = false;
+    this.wsServerIndex = 0;
+    this.consecutiveRestErrors = 0;
     this.connectWs();
   }
 
   public stop() {
     this.isDestroyed = true;
+    this.cleanupWs();
+    if (this.restPollInterval) {
+      clearInterval(this.restPollInterval);
+      this.restPollInterval = null;
+    }
+    if (this.wsRetryTimeout) {
+      clearTimeout(this.wsRetryTimeout);
+      this.wsRetryTimeout = null;
+    }
+    if (this.mockInterval) {
+      clearInterval(this.mockInterval);
+      this.mockInterval = null;
+    }
+  }
+
+  private cleanupWs() {
     if (this.ws) {
       try {
         this.ws.onopen = null;
@@ -190,10 +224,6 @@ export class MarketStreamManager {
       } catch {}
       this.ws = null;
     }
-    if (this.mockInterval) {
-      clearInterval(this.mockInterval);
-      this.mockInterval = null;
-    }
   }
 
   private connectWs() {
@@ -201,29 +231,41 @@ export class MarketStreamManager {
     this.onStatus('connecting');
 
     const streamName = `${this.symbol.toLowerCase()}@kline_${this.interval}`;
-    const wsUrl = `wss://stream.binance.com:9443/ws/${streamName}`;
+    const getUrl = WS_SERVERS[this.wsServerIndex % WS_SERVERS.length];
+    const wsUrl = getUrl(streamName);
 
-    let opened = false;
+    let connected = false;
 
     try {
+      this.cleanupWs();
       const ws = new WebSocket(wsUrl);
       this.ws = ws;
 
       const connectTimeout = setTimeout(() => {
-        if (!opened && !this.isDestroyed) {
-          // Fallback to high-frequency synthetic ticks if WS doesn't connect quickly
-          this.ws?.close();
-          this.startMockStream('WS timeout, demo live-stream');
+        if (!connected && !this.isDestroyed) {
+          try {
+            ws.close();
+          } catch {}
+          this.handleWsFailure('WS Connection timeout');
         }
-      }, 5000);
+      }, 3500);
 
       ws.onopen = () => {
         if (this.isDestroyed) {
           ws.close();
           return;
         }
-        opened = true;
+        connected = true;
         clearTimeout(connectTimeout);
+        // Stop REST polling if active since WebSocket is connected
+        if (this.restPollInterval) {
+          clearInterval(this.restPollInterval);
+          this.restPollInterval = null;
+        }
+        if (this.mockInterval) {
+          clearInterval(this.mockInterval);
+          this.mockInterval = null;
+        }
         this.onStatus('live');
       };
 
@@ -253,17 +295,107 @@ export class MarketStreamManager {
       ws.onerror = () => {
         if (this.isDestroyed) return;
         clearTimeout(connectTimeout);
-        this.startMockStream('WS error, demo mode active');
+        this.handleWsFailure('WS onerror event');
       };
 
       ws.onclose = () => {
         if (this.isDestroyed) return;
         clearTimeout(connectTimeout);
-        // If not intentionally destroyed, try mock stream
-        this.startMockStream('WS disconnected');
+        if (connected) {
+          // If was connected and closed, try reconnecting
+          this.handleWsFailure('WS closed');
+        }
       };
     } catch {
-      this.startMockStream('WS init failed');
+      this.handleWsFailure('WS instantiation failed');
+    }
+  }
+
+  private handleWsFailure(_reason: string) {
+    if (this.isDestroyed) return;
+    this.cleanupWs();
+
+    this.wsServerIndex++;
+    if (this.wsServerIndex < WS_SERVERS.length) {
+      // Try next WebSocket server endpoint
+      setTimeout(() => {
+        if (!this.isDestroyed) this.connectWs();
+      }, 500);
+    } else {
+      // All WebSocket endpoints failed (often due to ISP blocking wss port 9443 or Firefox strict mode)
+      // Switch immediately to REAL-TIME LIVE REST POLLING from Binance API
+      this.startLiveRestPolling();
+    }
+  }
+
+  // Real-Time Live REST Poller (fetches genuine Binance price & candles every 1.5s)
+  private startLiveRestPolling() {
+    if (this.isDestroyed || this.restPollInterval) return;
+
+    this.onStatus('live'); // 100% real live market data from Binance
+    this.pollLiveCandle();
+
+    this.restPollInterval = window.setInterval(() => {
+      if (this.isDestroyed) return;
+      this.pollLiveCandle();
+    }, 1500);
+
+    // Every 30 seconds, attempt to re-establish WebSocket in background
+    if (!this.wsRetryTimeout) {
+      this.wsRetryTimeout = window.setTimeout(() => {
+        this.wsRetryTimeout = null;
+        if (!this.isDestroyed) {
+          this.wsServerIndex = 0; // reset to primary
+          this.connectWs();
+        }
+      }, 30000);
+    }
+  }
+
+  private async pollLiveCandle() {
+    if (this.isDestroyed) return;
+
+    for (const endpoint of API_ENDPOINTS) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
+        const res = await fetch(
+          `${endpoint}/klines?symbol=${this.symbol}&interval=${this.interval}&limit=1`,
+          { signal: controller.signal }
+        );
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+          const raw = await res.json();
+          if (Array.isArray(raw) && raw.length > 0) {
+            const d = raw[0];
+            const candle: Candle = {
+              t: Number(d[0]),
+              open: Number(d[1]),
+              high: Number(d[2]),
+              low: Number(d[3]),
+              close: Number(d[4]),
+              volume: Number(d[5]),
+              quoteVolume: Number(d[7]),
+              closed: false,
+            };
+            this.lastPrice = candle.close;
+            this.currentCandle = candle;
+            this.consecutiveRestErrors = 0;
+            this.onStatus('live');
+            this.onCandle(candle);
+            return;
+          }
+        }
+      } catch {
+        // Try next endpoint
+      }
+    }
+
+    this.consecutiveRestErrors++;
+    // If even HTTP REST is blocked 6 times in a row (complete offline mode), fallback to mock
+    if (this.consecutiveRestErrors >= 6) {
+      this.startMockStream('All network streams unreachable');
     }
   }
 
@@ -284,7 +416,6 @@ export class MarketStreamManager {
       this.lastPrice = newPrice;
 
       if (!this.currentCandle || now - this.currentCandle.t >= stepMs) {
-        // New candle
         this.currentCandle = {
           t: Math.floor(now / stepMs) * stepMs,
           open: newPrice,
@@ -296,7 +427,6 @@ export class MarketStreamManager {
           closed: false,
         };
       } else {
-        // Update current candle
         this.currentCandle = {
           ...this.currentCandle,
           high: Math.max(this.currentCandle.high, newPrice),
@@ -312,3 +442,4 @@ export class MarketStreamManager {
     }, 1000);
   }
 }
+
