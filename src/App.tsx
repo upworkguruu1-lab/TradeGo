@@ -71,6 +71,7 @@ const DEFAULT_SETTINGS: TerminalSettings = {
   autoCopy: false,
   signalTtlSec: 90,
   cooldownSec: 60, // 60 seconds cooldown after trade exit
+  consecutiveLossCooldownMin: 25, // 25-minute pause after 2 consecutive losses (Anti-Cluster Guard)
   maxPositions: 1, // Max 1 active position at a time
   activeStrategies: {
     MOMENTUM: true,
@@ -214,6 +215,9 @@ export default function App() {
   const streamRef = useRef<MarketStreamManager | null>(null);
   const lastScanRef = useRef<number>(0);
   const lastExitTimeRef = useRef<number>(0);
+  const consecutiveLossCountRef = useRef<number>(0);
+  const clusterCooldownUntilRef = useRef<number | null>(null);
+  const lastLossTradeRef = useRef<{ price: number; dir: Direction; time: number } | null>(null);
 
   const addLog = useCallback((text: string, type = 'info') => {
     const time = new Date().toLocaleTimeString('ru-RU');
@@ -406,6 +410,24 @@ export default function App() {
       const pnlUsd = (pos.sizeUsd * pnlNetPct) / 100;
       const isWin = pnlNetPct > 0;
 
+      // Accurate Exit Type Classification (eliminates misleading "Stop-Loss" labels on winning trades)
+      let exitType: ClosedTrade['exitType'] = 'STOP_LOSS';
+      let displayReason = reason;
+
+      if (reason.includes('Take-Profit')) {
+        exitType = 'TAKE_PROFIT';
+        displayReason = 'Take-Profit взят! 🎯';
+      } else if (pnlNetPct > 0.05 && (pos.trailingActivated || pos.layer2Done)) {
+        exitType = 'TRAILING_PROFIT';
+        displayReason = 'Трейлинг-Стоп (Прибыль зафиксирована) 🛡️';
+      } else if (Math.abs(pnlNetPct) <= 0.08 && pos.layer2Done) {
+        exitType = 'BREAK_EVEN';
+        displayReason = 'Безубыток сработал (+0.08%) 🛡️';
+      } else {
+        exitType = 'STOP_LOSS';
+        displayReason = 'Stop-Loss сработал';
+      }
+
       const closedTrade: ClosedTrade = {
         id: `trade-${Date.now()}`,
         dir: pos.dir,
@@ -415,7 +437,13 @@ export default function App() {
         sl: pos.sl,
         tp: pos.tp,
         strategy: pos.strategy,
-        reason,
+        reason: displayReason,
+        exitType,
+        mfePct: pos.mfePct ?? Math.max(0, pnlGrossPct),
+        maePct: pos.maePct ?? Math.min(0, pnlGrossPct),
+        entryAdx: pos.entryAdx,
+        entryRsi: pos.entryRsi,
+        htfTrend: pos.htfTrend,
         pnlGrossPct,
         feePct,
         pnlNetPct,
@@ -428,6 +456,27 @@ export default function App() {
 
       setHistory((prev) => [closedTrade, ...prev]);
       setPositions((prev) => prev.filter((p) => p.id !== positionId));
+
+      // Anti-Cluster Loss Guard: Track consecutive losses to prevent loss spirals
+      if (!isWin) {
+        consecutiveLossCountRef.current += 1;
+        lastLossTradeRef.current = {
+          price: pos.entry,
+          dir: pos.dir,
+          time: Date.now(),
+        };
+
+        if (consecutiveLossCountRef.current >= 2) {
+          const cooldownMinutes = settings.consecutiveLossCooldownMin || 25;
+          clusterCooldownUntilRef.current = Date.now() + cooldownMinutes * 60 * 1000;
+          addLog(
+            `🛡️ Anti-Cluster Guard: Зафиксировано 2 убытка подряд! Включена защитная пауза на ${cooldownMinutes} мин для предотвращения распила депозита.`,
+            'info'
+          );
+        }
+      } else {
+        consecutiveLossCountRef.current = 0;
+      }
 
       // Update Strategy Stats
       setStrategyStats((prev) => {
@@ -476,13 +525,13 @@ export default function App() {
       }
 
       addLog(
-        `Сделка закрыта (${reason}) ${pos.dir} @ ${exitPrice.toFixed(2)} | Чистый P&L: ${
+        `Сделка закрыта (${displayReason}) ${pos.dir} @ ${exitPrice.toFixed(2)} | Чистый P&L: ${
           isWin ? '+' : ''
         }${pnlNetPct.toFixed(2)}% ($${pnlUsd.toFixed(1)})`,
         isWin ? 'win' : 'loss'
       );
     },
-    [positions, currentPrice, settings.useSound, addLog]
+    [positions, currentPrice, settings.consecutiveLossCooldownMin, settings.useSound, addLog]
   );
 
   // Position Monitor & Trailing Stop Engine
@@ -588,6 +637,19 @@ export default function App() {
     // Anti-overtrading Guard 4: Cooldown period after previous trade closure (avoids re-entering same chop)
     if (lastExitTimeRef.current && now - lastExitTimeRef.current < settings.cooldownSec * 1000) {
       return;
+    }
+
+    // Anti-overtrading Guard 5: Anti-Cluster Loss Guard (pauses trading after 2 losses in a row)
+    if (clusterCooldownUntilRef.current && now < clusterCooldownUntilRef.current) {
+      return;
+    }
+
+    // Anti-overtrading Guard 6: Price Churn Guard (prohibits re-entering at the exact same price where loss occurred)
+    if (lastLossTradeRef.current && (now - lastLossTradeRef.current.time < 30 * 60 * 1000)) {
+      const priceDiffPct = (Math.abs(currentPrice - lastLossTradeRef.current.price) / lastLossTradeRef.current.price) * 100;
+      if (priceDiffPct < 0.15) {
+        return; // Защита от повторного входа на том же уровне распила
+      }
     }
 
     const analysis = analyzeMarket(candles);
@@ -773,6 +835,11 @@ export default function App() {
       lowestPrice: sig.entry,
       breakEvenDone: false,
       trailingActivated: false,
+      mfePct: 0,
+      maePct: 0,
+      entryAdx: sig.analysis.adx,
+      entryRsi: sig.analysis.rsi,
+      htfTrend: candles.length > 25 ? getHigherTimeframeTrend(candles, 3).dir : 'NEUTRAL',
     };
 
     setPositions((prev) => [newPosition, ...prev]);

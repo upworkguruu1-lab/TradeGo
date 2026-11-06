@@ -408,6 +408,7 @@ export function checkBreak(
   return null;
 }
 
+// Refined Pullback Strategy: requires decisive candlestick rejection and protects against RSI exhaustion
 export function checkPullback(
   candles: Candle[],
   analysis: MarketAnalysis
@@ -417,34 +418,50 @@ export function checkPullback(
   const e9 = analysis.ema9;
   const e21 = analysis.ema21;
 
-  // Bullish pullback: price in strong uptrend (e9 > e21 and price > EMA50), dipped to test e9/e21, closed green
+  const candleRange = Math.max(0.0001, last.high - last.low);
+  const bodySize = Math.abs(last.close - last.open);
+  const isDecisiveBody = bodySize >= 0.30 * candleRange;
+
+  // Bullish pullback:
+  // 1. Established uptrend (e9 > e21 and close > EMA50)
+  // 2. Tested EMA-9/21 from above and formed a solid green rejection candle
+  // 3. Healthy RSI (44-60), avoiding buying into overbought tops
+  // 4. Trend momentum: ADX >= 20
   if (
     e9 > e21 &&
     last.close > analysis.ema50 &&
     last.low <= e9 * 1.002 &&
     last.close > last.open &&
-    analysis.rsi >= 46 &&
-    analysis.rsi <= 66
+    isDecisiveBody &&
+    analysis.rsi >= 44 &&
+    analysis.rsi <= 60 &&
+    analysis.adx >= 20
   ) {
     return {
       dir: 'LONG',
-      reason: 'Откат к трендовой EMA-9/21 и подтверждение разворота бычьей свечой',
+      reason: `Подтвержденный отбой от EMA-9/21 бычьей свечой (RSI ${analysis.rsi.toFixed(0)}, ADX ${analysis.adx.toFixed(0)})`,
       strategy: 'PULLBACK',
     };
   }
 
   // Bearish pullback:
+  // 1. Established downtrend (e9 < e21 and close < EMA50)
+  // 2. Tested EMA-9/21 from below with upper rejection wick and formed solid red candle
+  // 3. Healthy RSI (40-56), STRICTLY avoiding shorting oversold exhaustion bottoms (RSI < 40)
+  // 4. Trend momentum: ADX >= 20
   if (
     e9 < e21 &&
     last.close < analysis.ema50 &&
     last.high >= e9 * 0.998 &&
     last.close < last.open &&
-    analysis.rsi >= 34 &&
-    analysis.rsi <= 54
+    isDecisiveBody &&
+    analysis.rsi >= 40 &&
+    analysis.rsi <= 56 &&
+    analysis.adx >= 20
   ) {
     return {
       dir: 'SHORT',
-      reason: 'Тест сопротивления EMA-9/21 в нисходящем тренде и возврат продавцов',
+      reason: `Отбой от сопротивления EMA-9/21 медвежьей свечой (RSI ${analysis.rsi.toFixed(0)}, ADX ${analysis.adx.toFixed(0)})`,
       strategy: 'PULLBACK',
     };
   }

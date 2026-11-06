@@ -239,6 +239,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 className="w-full p-2 rounded bg-slate-950 border border-slate-800 font-mono text-amber-400 font-semibold"
               />
             </div>
+
+            <div className="space-y-1 col-span-2">
+              <label className="text-slate-400">Anti-Cluster Cooldown (пауза после 2 убытков подряд, мин):</label>
+              <input
+                type="number"
+                min="5"
+                max="120"
+                step="5"
+                value={settings.consecutiveLossCooldownMin ?? 25}
+                onChange={(e) => onSave({ consecutiveLossCooldownMin: parseInt(e.target.value, 10) || 25 })}
+                title="Защитная пауза в минутах после двух убыточных сделок подряд для предотвращения череды потерь в распиле"
+                className="w-full p-2 rounded bg-slate-950 border border-slate-800 font-mono text-purple-300 font-semibold"
+              />
+            </div>
           </div>
 
           {/* 5M PRO & Dynamic Sizing Toggles */}

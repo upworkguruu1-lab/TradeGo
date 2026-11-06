@@ -70,7 +70,14 @@ export interface UserPosition {
   trailingStep?: number;
   breakEvenDone?: boolean;
   trailingActivated?: boolean;
+  mfePct?: number;       // Max Favorable Excursion (% peak profit reached)
+  maePct?: number;       // Max Adverse Excursion (% deepest drawdown experienced)
+  entryAdx?: number;
+  entryRsi?: number;
+  htfTrend?: 'UP' | 'DOWN' | 'NEUTRAL';
 }
+
+export type ExitType = 'TAKE_PROFIT' | 'TRAILING_PROFIT' | 'BREAK_EVEN' | 'STOP_LOSS';
 
 export interface ClosedTrade {
   id: string;
@@ -82,6 +89,12 @@ export interface ClosedTrade {
   tp: number;
   strategy: StrategyName;
   reason: string;
+  exitType?: ExitType;
+  mfePct?: number;
+  maePct?: number;
+  entryAdx?: number;
+  entryRsi?: number;
+  htfTrend?: 'UP' | 'DOWN' | 'NEUTRAL';
   pnlGrossPct: number;
   feePct: number;
   pnlNetPct: number;
@@ -120,6 +133,7 @@ export interface TerminalSettings {
   trailingStopEnabled: boolean;  // Trailing stop lock-in as price advances
   useParabolicTrailing?: boolean; // Parabolic ATR trailing with acceleration factor
   useHtfFilter?: boolean;        // Multi-timeframe trend confluence filter (15M / 1H)
+  consecutiveLossCooldownMin?: number; // Minutes to pause after 2 losses in a row (Anti-Cluster Guard)
   timeframeOptimized: '5m' | 'auto'; // Specialized 5M candle optimization
   dailyTargetPct: number;        // Цель дневной сессии в % (например, +5%)
   maxDailyLossPct: number;       // Максимальная дневная просадка в % (например, -3%)
